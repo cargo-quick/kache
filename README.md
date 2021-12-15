@@ -4,17 +4,41 @@ This program caches Rust build products in s3. It is intended to be used with Gi
 
 ## Design
 
-In your GitHub Action build pipeline, before your build, run:
+In your GitHub Action build pipeline, before your build:
+
+Install kache from github releases:
 
 ```bash
-cargo install --git https://github.com/cargo-quick/kache
-kache load "${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}-${{ github.head_ref }}" "${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}" "${{ runner.os }}"
+set -euxo pipefail
+
+CARGO_BIN_DIR="$(dirname "$(which cargo)")"
+TARGET_ARCH="$(rustc --version --verbose | sed -n 's/host: //p')"
+
+curl \
+    --user-agent "github actions build script for $GITHUB_REPOSITORY" \
+    --location \
+    --silent \
+    --show-error \
+    --fail \
+    "https://github.com/cargo-quick/kache/releases/download/v0.1.1/kache-v0.1.1-${TARGET_ARCH}.tar.gz" \
+    | tar -xzvvf - -C "$CARGO_BIN_DIR"
+```
+
+Load from the s3 cache:
+
+```yaml
+  - run: kache load "${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}-${{ github.head_ref }}" "${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}" "${{ runner.os }}"
+    env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.BUILD_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.BUILD_SECRET_ACCESS_KEY }}
+        AWS_REGION: us-east-1
+        KACHE_BUCKET: your-s3-bucket
 ```
 
 This will attempt to find a cache that matches your branch and lockfiles, but fall back to
 using the cache for your lockfiles, or just your OS if none is available.
 
-After your build pipeline, run:
+After your build pipeline, run something like this, with the same environment variables set:
 
 ```bash
 kache save "${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}-${{ github.head_ref }}"
