@@ -50,7 +50,6 @@ Periodically, you will probably want to run a build that doesn't pull from any c
 
 ## Caveats
 
-* Building kache currently takes ages. It would be good to distribute it using `cargo-quickinstall`, but quickinstall doesn't allow git dependencies.
 * We still don't know how to cache rocksdb, so this will still be rebuilt every time.
 * When re-saving the cache, we only upload files that have changed (mtime) since unpacking the previous cache.
 * This program will never delete any files. It will happily cache files that are built from crates in your local repo, so the cache will continue to grow as those files churn.
