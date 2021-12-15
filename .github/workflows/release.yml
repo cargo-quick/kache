@@ -1,0 +1,36 @@
+on:
+  push:
+    tags:
+
+jobs:
+  release:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout main repo
+        uses: actions/checkout@v2
+
+      # Shamelessly stolen from https://github.com/alsuren/cargo-quickinstall/blob/main/.github/workflows/build-package.yml.template
+      - name: build package
+        env:
+          TEMPDIR: ${{github.workspace}}/built.d
+        run: |
+          set -euxo pipefail
+          # `tar` does not understand mixed forward and backslashes, but mkdir does.
+          # Try coercing it into a single style?
+          mkdir -p "$TEMPDIR"
+          pushd "$TEMPDIR"
+          TEMPDIR="$PWD"
+          popd
+          ./scripts/build-version.sh
+          ls $TEMPDIR
+
+      - name: Releasing assets
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            ${{github.workspace}}/built.d/kache-*.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

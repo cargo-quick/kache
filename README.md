@@ -32,3 +32,12 @@ Periodically, you will probably want to run a build that doesn't pull from any c
 * This program will never delete any files. It will happily cache files that are built from crates in your local repo, so the cache will continue to grow as those files churn.
 * We currently keep layering tarballs on top of tarballs forever. We should probably find a way to avoid doing that.
 * We currently only do single-threaded compression. Patches welcome.
+
+## Releasing
+
+```
+git tag v0.1.0 -m v0.1.0
+git push
+```
+
+Fingers crossed, github actions will do the rest.
