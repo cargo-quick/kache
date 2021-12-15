@@ -37,7 +37,7 @@ Periodically, you will probably want to run a build that doesn't pull from any c
 
 ```
 git tag v0.1.0 -m v0.1.0
-git push
+git push --tags
 ```
 
 Fingers crossed, github actions will do the rest.
