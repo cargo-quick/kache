@@ -286,6 +286,11 @@ async fn untar(slugs: BTreeMap<PathBuf, PathBuf>, tar: impl AsyncBufRead) -> Res
         let mut entry = entry.unwrap();
         let path = entry.path().unwrap().into_owned();
 
+        if path.ends_with("kache") || path.ends_with("kache.exe") {
+            // Don't replace ourselves - the version in cache may be stale
+            continue;
+        }
+
         let path = apply_transform(path, &slugs);
 
         let parent = path.parent().unwrap();
