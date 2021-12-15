@@ -24,7 +24,7 @@ jobs:
           pushd "$TEMPDIR"
           TEMPDIR="$PWD"
           popd
-          ./scripts/build-version.sh
+          ./scripts/build-version.sh kache ${GITHUB_REF##*/}
           ls $TEMPDIR
 
       - name: Releasing assets

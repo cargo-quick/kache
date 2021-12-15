@@ -5,8 +5,8 @@ set -euxo pipefail
 
 cd "$(dirname "$0")/.."
 
-CRATE="kache"
-VERSION="$(git describe HEAD)"
+CRATE=${1?"USAGE: $0 CRATE VERSION - missing CRATE argument"}
+VERSION=${2?"USAGE: $0 CRATE VERSION - missing VERSION argument"}
 
 date
 
