@@ -19,6 +19,8 @@ jobs:
       - name: Make iteration time faster
         uses: Swatinem/rust-cache@v1
         with:
+          # Cargo.lock changes with every release
+          sharedKey: always-share-cache
           cache-on-failure: true
 
       # Shamelessly stolen from https://github.com/alsuren/cargo-quickinstall/blob/main/.github/workflows/build-package.yml.template
