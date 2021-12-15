@@ -103,7 +103,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     match cmd.cmd {
         Cmd_::Save(CmdSave { keys }) => {
-            println!("saving cache to: {keys:?}");
+            println!("saving cache to: {:?}", keys);
             let id: [u8; 16] = rand::random();
             let id = base_x::encode(WEB_SAFE, &id);
             let info_path = PathBuf::from(".kache-info");
@@ -111,11 +111,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 Ok(info) => {
                     let parent_id = read_to_string(info_path).unwrap();
                     let parent_id = parent_id.trim_end_matches('\n');
-                    (format!("{parent_id}:{id}"), Some(info.modified().unwrap()))
+                    (
+                        format!("{}:{}", parent_id, id),
+                        Some(info.modified().unwrap()),
+                    )
                 }
                 Err(_) => (id, None),
             };
-            println!("packing {id}");
+            println!("packing {}", id);
             let tar = tar(iter::empty()
                 .chain(walk(
                     PathBuf::from("cargo").join("bin"),
@@ -164,21 +167,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
             println!("finished saving cache");
         }
         Cmd_::Uncache(CmdLoad { keys }) => {
-            println!("fetching cache from: {keys:?}");
+            println!("fetching cache from: {:?}", keys);
             for key in keys {
                 let key = format!("keys/{}.txt", key);
                 if let Ok(mut id_) = aws::download(s3_client, bucket.clone(), key.clone()).await {
                     // Assumption: if this id is listed in s3 under this cache key then the underlying blobs *must* still exist.
                     let mut id = String::new();
                     let _ = id_.read_to_string(&mut id).await?;
-                    println!("cache hit: {key} -> {id}");
+                    println!("cache hit: {} -> {}", key, id);
                     let ids = id
                         .match_indices(':')
                         .map(|(index, _)| &id[..index])
                         .chain(std::iter::once(id.as_ref()));
                     for id in ids {
                         let blob_id = format!("blobs/{}.tar.zst", id);
-                        println!("unpacking {blob_id}");
+                        println!("unpacking {}", blob_id);
                         let tar = aws::download(s3_client, bucket.clone(), blob_id).await?;
                         untar(
                             vec![
@@ -287,16 +290,27 @@ async fn untar(slugs: BTreeMap<PathBuf, PathBuf>, tar: impl AsyncBufRead) -> Res
 
         let parent = path.parent().unwrap();
         let _ = fs::create_dir_all(&parent);
-        entry.unpack(&path).await.map(drop).unwrap_or_else(|err| match err.kind() {
-			io::ErrorKind::PermissionDenied if path.exists() => {
-				println!("permission denied writing to preexisting {path:?} - skipping")
-			}
-			_ => {
-				let metadata = path.metadata();
-				let parent_metadata = parent.metadata();
-				panic!("Could not unpack {path:?}: {err:?}\nmetadata: {metadata:?}\nparent_metadata: {parent_metadata:?}")
-			}
-		});
+        entry
+            .unpack(&path)
+            .await
+            .map(drop)
+            .unwrap_or_else(|err| match err.kind() {
+                io::ErrorKind::PermissionDenied if path.exists() => {
+                    println!(
+                        "permission denied writing to preexisting {:?} - skipping",
+                        path
+                    )
+                }
+                _ => {
+                    panic!(
+                        "Could not unpack {:?}: {:?}\nmetadata: {:?}\nparent_metadata: {:?}",
+                        path,
+                        err,
+                        path.metadata(),
+                        parent.metadata()
+                    )
+                }
+            });
     }
 
     Ok(())
@@ -309,7 +323,7 @@ fn apply_transform(path: PathBuf, slugs: &BTreeMap<PathBuf, PathBuf>) -> PathBuf
             return base.join(path);
         }
     }
-    panic!("{path:?} does not match anything in {slugs:?}");
+    panic!("{:?} does not match anything in {:?}", path, slugs);
 }
 
 #[pin_project]
