@@ -20,7 +20,7 @@ curl \
     --silent \
     --show-error \
     --fail \
-    "https://github.com/cargo-quick/kache/releases/download/v0.1.1/kache-v0.1.1-${TARGET_ARCH}.tar.gz" \
+    "https://github.com/cargo-quick/kache/releases/download/v0.1.2/kache-v0.1.2-${TARGET_ARCH}.tar.gz" \
     | tar -xzvvf - -C "$CARGO_BIN_DIR"
 ```
 
