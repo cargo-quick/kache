@@ -28,6 +28,7 @@ use std::{
     time::SystemTime,
 };
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf};
+use tokio_tar::EntryType;
 use walkdir::WalkDir;
 
 const WEB_SAFE: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_~";
@@ -282,11 +283,13 @@ async fn untar(slugs: BTreeMap<PathBuf, PathBuf>, tar: impl AsyncBufRead) -> Res
 
     let mut entries = tokio_tar::Archive::new(tar).entries().unwrap();
 
+    let mut mtimes = BTreeMap::new();
+
     while let Some(entry) = entries.next().await {
         let mut entry = entry.unwrap();
         let path = entry.path().unwrap().into_owned();
 
-        if path.ends_with("kache") || path.ends_with("kache.exe") {
+        if path.file_stem().unwrap() == "kache" {
             // Don't replace ourselves - the version in cache may be stale
             continue;
         }
@@ -295,6 +298,9 @@ async fn untar(slugs: BTreeMap<PathBuf, PathBuf>, tar: impl AsyncBufRead) -> Res
 
         let parent = path.parent().unwrap();
         let _ = fs::create_dir_all(&parent);
+        if entry.header().entry_type() == EntryType::Directory {
+            let _ = mtimes.insert(path.clone(), entry.header().mtime().unwrap());
+        }
         entry
             .unpack(&path)
             .await
@@ -316,6 +322,14 @@ async fn untar(slugs: BTreeMap<PathBuf, PathBuf>, tar: impl AsyncBufRead) -> Res
                     )
                 }
             });
+    }
+
+    for (path, mtime) in mtimes.into_iter().rev() {
+        filetime::set_file_mtime(
+            path,
+            filetime::FileTime::from_unix_time(mtime.try_into().unwrap(), 0),
+        )
+        .unwrap();
     }
 
     Ok(())
