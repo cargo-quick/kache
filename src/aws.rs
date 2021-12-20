@@ -234,12 +234,11 @@ pub async fn download(
                         let mut buf = BytesMut::with_capacity(cap);
 
                         while buf.len() != cap {
-                            let _ = match body.read_buf(&mut buf).await {
-                                Ok(_bytes) => {
-                                    assert!(buf.len() <= cap);
-                                }
+                            let _bytes = match body.read_buf(&mut buf).await {
+                                Ok(bytes) => bytes,
                                 Err(_e) => continue 'async_read,
                             };
+                            assert!(buf.len() <= cap);
                         }
                         break Ok::<_, io::Error>(buf);
                     }
