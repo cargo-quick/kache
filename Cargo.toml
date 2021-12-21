@@ -27,6 +27,7 @@ rusoto_core = { version = "0.47", default-features = false, features = ["rustls"
 rusoto_credential = "0.47"
 rusoto_s3 = { version = "0.47", default-features = false, features = ["rustls"] }
 serde = "1"
+serde_json = "1"
 serde_with = "1"
 tokio = { version = "1", features = ["macros", "net", "fs", "process", "rt-multi-thread", "io-util"] }
 tokio-tar = { version = "0.3", git = "https://github.com/vorot93/tokio-tar" }

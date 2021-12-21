@@ -741,6 +741,7 @@ dependencies = [
  "rusoto_credential",
  "rusoto_s3",
  "serde",
+ "serde_json",
  "serde_with",
  "shiplift",
  "tokio",

@@ -15,7 +15,7 @@ use rusoto_credential::StaticProvider;
 use rusoto_s3::S3Client;
 use serde::Deserialize;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet, HashMap},
     env,
     error::Error,
     fs::{self, read_to_string},
@@ -78,6 +78,16 @@ struct CmdLoad {
     keys: Vec<String>,
 }
 
+#[derive(Deserialize)]
+struct Crates {
+    installs: HashMap<String, Install>,
+}
+
+#[derive(Deserialize)]
+struct Install {
+    bins: Vec<PathBuf>,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     env::set_var("RUST_BACKTRACE", "1");
@@ -101,11 +111,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let target_dir = PathBuf::from("./target"); // TODO: actually deduce
     let cargo_home = home::cargo_home().unwrap();
-    let docker_dir = shiplift::Docker::new()
+    let mut docker_dir = shiplift::Docker::new()
         .info()
         .await
         .ok()
         .map(|info| PathBuf::from(info.docker_root_dir));
+    if docker_dir.is_some() && cfg!(target_os = "macos") {
+        docker_dir = Some(
+            home::home_dir()
+                .unwrap()
+                .join("Library/Containers/com.docker.docker/Data/vms"),
+        );
+    }
+    let crates: Crates =
+        serde_json::from_slice(&fs::read(cargo_home.join(".crates2.json")).unwrap()).unwrap();
+    let cargo_bins = crates
+        .installs
+        .values()
+        .flat_map(|install| &install.bins)
+        .filter(|bin| bin.file_stem().unwrap() != "kache")
+        .collect::<BTreeSet<_>>();
 
     match cmd.cmd {
         Cmd_::Save(CmdSave { keys }) => {
@@ -136,11 +161,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     cargo_home.join(".crates2.json"),
                     cutoff,
                 ))
-                .chain(walk(
-                    PathBuf::from("cargo").join("bin"),
-                    cargo_home.join("bin"),
-                    cutoff,
-                ))
+                .chain(cargo_bins.into_iter().flat_map(|bin| {
+                    walk(
+                        PathBuf::from("cargo").join("bin").join(&bin),
+                        cargo_home.join("bin").join(bin),
+                        cutoff,
+                    )
+                }))
                 .chain(walk(
                     PathBuf::from("cargo").join("registry/index"),
                     cargo_home.join("registry/index"),
@@ -257,7 +284,7 @@ fn walk(
     slug: PathBuf,
     base: PathBuf,
     cutoff: Option<SystemTime>,
-) -> impl Iterator<Item = (PathBuf, PathBuf, PathBuf)> {
+) -> impl Iterator<Item = (PathBuf, PathBuf, Option<PathBuf>)> {
     WalkDir::new(&base)
         .sort_by(|a, b| a.file_name().cmp(b.file_name()))
         .into_iter()
@@ -266,8 +293,8 @@ fn walk(
             let t = entry.file_type();
             let path = entry.path().strip_prefix(&base).unwrap().to_owned();
             let non_empty = path.components().next().is_some();
-            if non_empty
-                && (t.is_file() || t.is_symlink() || t.is_dir())
+            let path = non_empty.then(|| path);
+            if (t.is_file() || t.is_symlink() || t.is_dir())
                 && cutoff
                     .map(|cutoff| cutoff < entry.metadata().unwrap().modified().unwrap())
                     .unwrap_or(true)
@@ -279,7 +306,7 @@ fn walk(
         })
 }
 
-fn tar(paths: impl Iterator<Item = (PathBuf, PathBuf, PathBuf)>) -> impl AsyncRead {
+fn tar(paths: impl Iterator<Item = (PathBuf, PathBuf, Option<PathBuf>)>) -> impl AsyncRead {
     let (writer, reader) = async_pipe::pipe();
     let task = async move {
         // create a .tar.zsd
@@ -293,11 +320,15 @@ fn tar(paths: impl Iterator<Item = (PathBuf, PathBuf, PathBuf)>) -> impl AsyncRe
         tar_.mode(tokio_tar::HeaderMode::Complete);
         tar_.follow_symlinks(false);
 
-        // add resources (check for docker images) to tar
-        for (slug, base, relative) in paths {
-            tar_.append_path_with_name(base.join(&relative), slug.join(&relative))
+        // add resources to tar
+        for (mut slug, mut base, relative) in paths {
+            if let Some(relative) = relative {
+                base = base.join(&relative);
+                slug = slug.join(&relative);
+            }
+            tar_.append_path_with_name(base.clone(), slug)
                 .await
-                .unwrap();
+                .unwrap_or_else(|e| panic!("can't tar {}: {:?}", base.display(), e));
         }
 
         // flush writers
@@ -325,39 +356,33 @@ async fn untar(slugs: BTreeMap<PathBuf, PathBuf>, tar: impl AsyncBufRead) -> Res
         let mut entry = entry.unwrap();
         let path = entry.path().unwrap().into_owned();
 
-        if path.file_stem().unwrap() == "kache" {
-            // Don't replace ourselves - the version in cache may be stale
-            continue;
-        }
-
         let path = apply_transform(path, &slugs);
 
         let parent = path.parent().unwrap();
         let _ = fs::create_dir_all(&parent);
-        if entry.header().entry_type() == EntryType::Directory {
-            let _ = mtimes.insert(path.clone(), entry.header().mtime().unwrap());
+        if let Ok(metadata) = fs::metadata(&path) {
+            let mut perms = metadata.permissions();
+            perms.set_readonly(false);
+            let _ = fs::set_permissions(&path, perms);
         }
-        entry
-            .unpack(&path)
-            .await
-            .map(drop)
-            .unwrap_or_else(|err| match err.kind() {
-                io::ErrorKind::PermissionDenied if path.exists() => {
-                    println!(
-                        "permission denied writing to preexisting {:?} - skipping",
-                        path
-                    )
-                }
-                _ => {
-                    panic!(
-                        "Could not unpack {:?}: {:?}\nmetadata: {:?}\nparent_metadata: {:?}",
-                        path,
-                        err,
-                        path.metadata(),
-                        parent.metadata()
-                    )
-                }
-            });
+        let _ = fs::remove_file(&path);
+        match entry.header().entry_type() {
+            EntryType::Directory => {
+                let _ = mtimes.insert(path.clone(), entry.header().mtime().unwrap());
+            }
+            _ => {
+                let _ = fs::remove_dir_all(&path);
+            }
+        }
+        entry.unpack(&path).await.map(drop).unwrap_or_else(|err| {
+            panic!(
+                "Could not unpack {:?}: {:?}\nmetadata: {:?}\nparent_metadata: {:?}",
+                path,
+                err,
+                path.metadata(),
+                parent.metadata()
+            )
+        });
     }
 
     for (path, mtime) in mtimes.into_iter().rev() {
@@ -375,7 +400,12 @@ fn apply_transform(path: PathBuf, slugs: &BTreeMap<PathBuf, PathBuf>) -> PathBuf
     // Iterate in reverse order. This should visit more specific slugs first.
     for (slug, base) in slugs.iter().rev() {
         if let Ok(path) = path.strip_prefix(slug) {
-            return base.join(path);
+            let mut base = base.clone();
+            let non_empty = path.components().next().is_some();
+            if non_empty {
+                base = base.join(path);
+            }
+            return base;
         }
     }
     panic!("{:?} does not match anything in {:?}", path, slugs);
