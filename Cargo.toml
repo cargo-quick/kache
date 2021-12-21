@@ -32,3 +32,9 @@ tokio = { version = "1", features = ["macros", "net", "fs", "process", "rt-multi
 tokio-tar = { version = "0.3", git = "https://github.com/vorot93/tokio-tar" }
 tokio-util = { version = "0.6", features = ["io"] }
 walkdir = "2"
+
+[target.'cfg(unix)'.dependencies]
+shiplift = { version = "0.7", default-features = false, features = ["unix-socket"], git = "https://github.com/alecmocatta/shiplift" }
+
+[target.'cfg(windows)'.dependencies]
+shiplift = { version = "0.7", default-features = false, git = "https://github.com/alecmocatta/shiplift" }

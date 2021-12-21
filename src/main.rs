@@ -101,6 +101,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let target_dir = PathBuf::from("./target"); // TODO: actually deduce
     let cargo_home = home::cargo_home().unwrap();
+    let docker_dir = shiplift::Docker::new()
+        .info()
+        .await
+        .ok()
+        .map(|info| PathBuf::from(info.docker_root_dir));
 
     match cmd.cmd {
         Cmd_::Save(CmdSave { keys }) => {
@@ -141,7 +146,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     cargo_home.join("git/db"),
                     cutoff,
                 ))
-                .chain(walk(PathBuf::from("target"), target_dir, cutoff)));
+                .chain(walk(PathBuf::from("target"), target_dir, cutoff))
+                .chain(
+                    docker_dir
+                        .as_ref()
+                        .map(|docker_dir| walk(PathBuf::from("docker"), docker_dir.clone(), cutoff))
+                        .into_iter()
+                        .flatten(),
+                ));
             aws::upload(
                 s3_client,
                 bucket.clone(),
@@ -185,7 +197,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         println!("unpacking {}", blob_id);
                         let tar = aws::download(s3_client, bucket.clone(), blob_id).await?;
                         untar(
-                            vec![
+                            [
                                 (PathBuf::from("cargo").join("bin"), cargo_home.join("bin")),
                                 (
                                     PathBuf::from("cargo").join("registry/index"),
@@ -202,6 +214,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 (PathBuf::from("target"), target_dir.clone()),
                             ]
                             .into_iter()
+                            .chain(
+                                docker_dir.as_ref().map(|docker_dir| {
+                                    (PathBuf::from("docker"), docker_dir.clone())
+                                }),
+                            )
                             .collect(),
                             tar,
                         )
