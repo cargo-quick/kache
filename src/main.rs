@@ -127,6 +127,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
             println!("packing {}", id);
             let tar = tar(iter::empty()
                 .chain(walk(
+                    PathBuf::from("cargo").join(".crates.toml"),
+                    cargo_home.join(".crates.toml"),
+                    cutoff,
+                ))
+                .chain(walk(
+                    PathBuf::from("cargo").join(".crates2.json"),
+                    cargo_home.join(".crates2.json"),
+                    cutoff,
+                ))
+                .chain(walk(
                     PathBuf::from("cargo").join("bin"),
                     cargo_home.join("bin"),
                     cutoff,
@@ -198,6 +208,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         let tar = aws::download(s3_client, bucket.clone(), blob_id).await?;
                         untar(
                             [
+                                (
+                                    PathBuf::from("cargo").join(".crates.toml"),
+                                    cargo_home.join(".crates.toml"),
+                                ),
+                                (
+                                    PathBuf::from("cargo").join(".crates2.json"),
+                                    cargo_home.join(".crates2.json"),
+                                ),
                                 (PathBuf::from("cargo").join("bin"), cargo_home.join("bin")),
                                 (
                                     PathBuf::from("cargo").join("registry/index"),
@@ -273,6 +291,7 @@ fn tar(paths: impl Iterator<Item = (PathBuf, PathBuf, PathBuf)>) -> impl AsyncRe
         let tar_ = ZstdEncoder::with_quality(writer, Level::Fastest);
         let mut tar_ = tokio_tar::Builder::new(tar_);
         tar_.mode(tokio_tar::HeaderMode::Complete);
+        tar_.follow_symlinks(false);
 
         // add resources (check for docker images) to tar
         for (slug, base, relative) in paths {
