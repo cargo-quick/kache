@@ -9,6 +9,7 @@ use futures::{
     future::{try_join_all, Fuse},
     FutureExt, StreamExt,
 };
+use once_cell::unsync::Lazy;
 use pin_project::pin_project;
 use rusoto_core::{HttpClient, Region};
 use rusoto_credential::StaticProvider;
@@ -60,7 +61,7 @@ struct Cmd {
 #[argh(subcommand)]
 enum Cmd_ {
     Save(CmdSave),
-    Uncache(CmdLoad),
+    Load(CmdLoad),
 }
 
 #[derive(FromArgs, Debug)]
@@ -76,6 +77,9 @@ struct CmdSave {
 /// load cache from s3
 #[argh(subcommand, name = "load")]
 struct CmdLoad {
+    #[argh(switch)]
+    /// clean docker images
+    clean: bool,
     #[argh(positional)]
     /// keys. will try from left to right
     keys: Vec<String>,
@@ -98,19 +102,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let cmd: Cmd = argh::from_env();
 
-    let aws_config: AwsConfig = envy::prefixed("AWS_").from_env().unwrap();
-    let config: Config = envy::prefixed("KACHE_").from_env().unwrap();
+    let config = &Lazy::new(|| envy::prefixed("KACHE_").from_env::<Config>().unwrap());
+    let s3_client = &Lazy::new(|| {
+        let aws_config: AwsConfig = envy::prefixed("AWS_").from_env().unwrap();
 
-    let http_client = Arc::new(HttpClient::new().expect("failed to create request dispatcher"));
-    let creds = StaticProvider::new(
-        aws_config.access_key_id,
-        aws_config.secret_access_key,
-        None,
-        None,
-    );
-    let s3_client = &S3Client::new_with(http_client.clone(), creds.clone(), aws_config.region);
-
-    let bucket = &config.bucket;
+        let http_client = Arc::new(HttpClient::new().expect("failed to create request dispatcher"));
+        let creds = StaticProvider::new(
+            aws_config.access_key_id,
+            aws_config.secret_access_key,
+            None,
+            None,
+        );
+        S3Client::new_with(http_client, creds, aws_config.region)
+    });
 
     let target_dir = PathBuf::from("./target"); // TODO: actually deduce
     let cargo_home = home::cargo_home().unwrap();
@@ -199,7 +203,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     ));
                 aws::upload(
                     s3_client,
-                    bucket.clone(),
+                    config.bucket.clone(),
                     format!("blobs/{}.tar.zst", id),
                     String::from("application/zstd"),
                     Some(31536000),
@@ -211,7 +215,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     let key = format!("keys/{}.txt", key);
                     aws::upload(
                         s3_client,
-                        bucket.clone(),
+                        config.bucket.clone(),
                         key,
                         String::from("text/plain"),
                         Some(600),
@@ -222,11 +226,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .await?;
                 println!("finished saving cache");
             }
-            Cmd_::Uncache(CmdLoad { keys }) => {
+            Cmd_::Load(CmdLoad { clean, keys }) => {
+                if clean {
+                    if let Some(docker_dir) = &docker_dir {
+                        // much quicker than: docker system prune -af --volumes
+                        for entry in fs::read_dir(docker_dir).into_iter().flatten().flatten() {
+                            let _ = fs::remove_dir_all(entry.path());
+                        }
+                    }
+                }
                 println!("fetching cache from: {:?}", keys);
                 for key in keys {
                     let key = format!("keys/{}.txt", key);
-                    if let Ok(mut id_) = aws::download(s3_client, bucket.clone(), key.clone()).await
+                    if let Ok(mut id_) =
+                        aws::download(s3_client, config.bucket.clone(), key.clone()).await
                     {
                         // Assumption: if this id is listed in s3 under this cache key then the underlying blobs *must* still exist.
                         let mut id = String::new();
@@ -239,7 +252,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         for id in ids {
                             let blob_id = format!("blobs/{}.tar.zst", id);
                             println!("unpacking {}", blob_id);
-                            let tar = aws::download(s3_client, bucket.clone(), blob_id).await?;
+                            let tar =
+                                aws::download(s3_client, config.bucket.clone(), blob_id).await?;
                             untar(
                                 [
                                     (

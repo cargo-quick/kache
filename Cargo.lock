@@ -735,6 +735,7 @@ dependencies = [
  "futures",
  "home",
  "indicatif",
+ "once_cell",
  "pin-project 1.0.8",
  "rand",
  "rusoto_core",
