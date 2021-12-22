@@ -722,7 +722,7 @@ dependencies = [
 
 [[package]]
 name = "kache"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "argh",
  "async-compression",
@@ -735,7 +735,6 @@ dependencies = [
  "futures",
  "home",
  "indicatif",
- "once_cell",
  "pin-project 1.0.8",
  "rand",
  "rusoto_core",

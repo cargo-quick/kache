@@ -9,7 +9,6 @@ use futures::{
     future::{try_join_all, Fuse},
     FutureExt, StreamExt,
 };
-use once_cell::unsync::Lazy;
 use pin_project::pin_project;
 use rusoto_core::{HttpClient, Region};
 use rusoto_credential::StaticProvider;
@@ -99,8 +98,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let cmd: Cmd = argh::from_env();
 
-    let config = &Lazy::new(|| envy::prefixed("KACHE_").from_env::<Config>().unwrap());
-    let s3_client = &Lazy::new(|| {
+    let config = &envy::prefixed("KACHE_").from_env::<Config>().unwrap();
+    let s3_client = &{
         let aws_config: AwsConfig = envy::prefixed("AWS_").from_env().unwrap();
 
         let http_client = Arc::new(HttpClient::new().expect("failed to create request dispatcher"));
@@ -111,7 +110,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             None,
         );
         S3Client::new_with(http_client, creds, aws_config.region)
-    });
+    };
 
     let target_dir = PathBuf::from("./target"); // TODO: actually deduce
     let cargo_home = home::cargo_home().unwrap();

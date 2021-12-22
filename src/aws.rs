@@ -162,6 +162,7 @@ pub async fn download(
     })
     .await
     .map_err(|e| io::Error::new(io::ErrorKind::NotFound, e.to_string()))?;
+
     let (part_size, parts): (u64, Option<u64>) = (
         head.content_length.unwrap().try_into().unwrap(),
         head.parts_count.map(|x| x.try_into().unwrap()),
@@ -206,35 +207,46 @@ pub async fn download(
         let body = tokio_util::io::StreamReader::new(
             futures::stream::iter((0..parts).map(move |i| {
                 let (pb, bucket, key) = (pb.clone(), bucket.clone(), key.clone());
+
+                // This is the part of the code that does the actual downloading.
                 async move {
                     let range = part_size * i..(part_size * (i + 1)).min(length);
-                    let body = rusoto_retry(|| async {
-                        s3_client
-                            .get_object(rusoto_s3::GetObjectRequest {
-                                bucket: bucket.clone(),
-                                key: key.clone(),
-                                part_number: Some((i + 1).try_into().unwrap()),
-                                ..Default::default()
-                            })
-                            .await
-                    })
-                    .await
-                    .unwrap()
-                    .body
-                    .unwrap()
-                    .into_async_read();
-                    let mut body = pb.wrap_async_read(body);
-                    let cap: usize = (range.end - range.start).try_into().unwrap();
-                    let mut buf = BytesMut::with_capacity(cap);
-                    while buf.len() != cap {
-                        let _ = body.read_buf(&mut buf).await?;
-                        assert!(buf.len() <= cap);
+
+                    'async_read: loop {
+                        let body = rusoto_retry(|| async {
+                            s3_client
+                                .get_object(rusoto_s3::GetObjectRequest {
+                                    bucket: bucket.clone(),
+                                    key: key.clone(),
+                                    part_number: Some((i + 1).try_into().unwrap()),
+                                    ..Default::default()
+                                })
+                                .await
+                        })
+                        .await
+                        .unwrap()
+                        .body
+                        .unwrap()
+                        .into_async_read();
+
+                        let mut body = pb.wrap_async_read(body);
+                        let cap: usize = (range.end - range.start).try_into().unwrap();
+                        let mut buf = BytesMut::with_capacity(cap);
+
+                        while buf.len() != cap {
+                            let _bytes = match body.read_buf(&mut buf).await {
+                                Ok(bytes) => bytes,
+                                Err(_e) => continue 'async_read,
+                            };
+                            assert!(buf.len() <= cap);
+                        }
+                        break Ok::<_, io::Error>(buf);
                     }
-                    Ok::<_, io::Error>(buf)
                 }
             }))
             .buffered(parallelism),
         );
+
         Ok(tokio_util::either::Either::Left(body))
     } else {
         let body = rusoto_retry(|| async {
@@ -251,8 +263,10 @@ pub async fn download(
         .body
         .unwrap()
         .into_async_read();
+
         let body = pb.wrap_async_read(body);
         let body = tokio::io::BufReader::with_capacity(16 * 1024 * 1024, body);
+
         Ok(tokio_util::either::Either::Right(body))
     }
 }
