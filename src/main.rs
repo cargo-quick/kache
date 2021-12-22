@@ -26,7 +26,7 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 use tokio::{
     io::{AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf},
@@ -146,7 +146,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 let id: [u8; 16] = rand::random();
                 let id = base_x::encode(WEB_SAFE, &id);
                 let info_path = PathBuf::from(".kache-info");
-                let (id, cutoff) = match info_path.metadata() {
+                let (id, cutoff) = match info_path.symlink_metadata() {
                     Ok(info) => {
                         let parent_id = read_to_string(info_path).unwrap();
                         let parent_id = parent_id.trim_end_matches('\n');
@@ -229,9 +229,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
             Cmd_::Load(CmdLoad { clean, keys }) => {
                 if clean {
                     if let Some(docker_dir) = &docker_dir {
+                        println!("Cleaning docker");
                         // much quicker than: docker system prune -af --volumes
-                        for entry in fs::read_dir(docker_dir).into_iter().flatten().flatten() {
-                            let _ = fs::remove_dir_all(entry.path());
+                        // https://github.com/rust-lang/rust/blob/e100ec5bc7cd768ec17d75448b29c9ab4a39272b/src/bootstrap/clean.rs#L98-L114
+                        for entry in WalkDir::new(docker_dir).contents_first(true) {
+                            let entry = entry.unwrap();
+                            let path = entry.path();
+                            if path.components().next().is_none() {
+                                continue;
+                            }
+                            if let Ok(metadata) = fs::symlink_metadata(&path) {
+                                let mut perms = metadata.permissions();
+                                perms.set_readonly(false);
+                                let _ = fs::set_permissions(&path, perms);
+                            }
+                            let _ = fs::remove_file(path);
+                            let _ = fs::remove_dir(path);
                         }
                     }
                 }
@@ -305,35 +318,66 @@ async fn stop_docker<F, O>(f: impl FnOnce() -> F) -> Result<O, Box<dyn Error>>
 where
     F: Future<Output = O>,
 {
-    if cfg!(windows) {
-        let mut docker_stop = process::Command::new("powershell");
-        docker_stop.args(["-command", "Stop-Service docker -Force"]);
-        let status = docker_stop.status().await?;
-        if !status.success() {
-            return Err(format!("{:?}", status).into());
+    let has_docker = shiplift::Docker::new().info().await.is_ok();
+    if has_docker {
+        println!("Stopping docker");
+        if cfg!(windows) {
+            let mut docker_stop = process::Command::new("powershell");
+            docker_stop.args(["-command", "Stop-Service docker -Force"]);
+            let status = docker_stop.status().await?;
+            if !status.success() {
+                return Err(format!("{:?}", status).into());
+            }
+        } else if cfg!(target_os = "linux") {
+            let mut docker_stop = process::Command::new("sudo");
+            docker_stop.args(["systemctl", "stop", "docker"]);
+            let status = docker_stop.status().await?;
+            if !status.success() {
+                return Err(format!("{:?}", status).into());
+            }
+        } else if cfg!(target_os = "macos") {
+            let mut docker_stop = process::Command::new("osascript");
+            docker_stop.args(["-e", "quit app \"Docker\""]);
+            let status = docker_stop.status().await?;
+            if !status.success() {
+                return Err(format!("{:?}", status).into());
+            }
+        } else {
+            unimplemented!();
         }
-    } else if cfg!(target_os = "linux") {
-        let mut docker_stop = process::Command::new("sudo");
-        docker_stop.args(["systemctl", "stop", "docker"]);
-        let status = docker_stop.status().await?;
-        if !status.success() {
-            return Err(format!("{:?}", status).into());
+        while shiplift::Docker::new().info().await.is_ok() {
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
     let ret = panic::AssertUnwindSafe(f()).catch_unwind().await;
-    if cfg!(windows) {
-        let mut docker_stop = process::Command::new("powershell");
-        docker_stop.args(["-command", "Start-Service docker"]);
-        let status = docker_stop.status().await?;
-        if !status.success() {
-            return Err::<O, _>(format!("{:?}", status).into());
+    if has_docker {
+        println!("Starting docker");
+        if cfg!(windows) {
+            let mut docker_stop = process::Command::new("powershell");
+            docker_stop.args(["-command", "Start-Service docker"]); // TODO: wait till it's listening before returning
+            let status = docker_stop.status().await?;
+            if !status.success() {
+                return Err::<O, _>(format!("{:?}", status).into());
+            }
+        } else if cfg!(target_os = "linux") {
+            let mut docker_stop = process::Command::new("sudo");
+            docker_stop.args(["systemctl", "start", "docker"]);
+            let status = docker_stop.status().await?;
+            if !status.success() {
+                return Err::<O, _>(format!("{:?}", status).into());
+            }
+        } else if cfg!(target_os = "macos") {
+            let mut docker_stop = process::Command::new("open");
+            docker_stop.args(["-a", "Docker"]);
+            let status = docker_stop.status().await?;
+            if !status.success() {
+                return Err(format!("{:?}", status).into());
+            }
+        } else {
+            unimplemented!();
         }
-    } else if cfg!(target_os = "linux") {
-        let mut docker_stop = process::Command::new("sudo");
-        docker_stop.args(["systemctl", "start", "docker"]);
-        let status = docker_stop.status().await?;
-        if !status.success() {
-            return Err::<O, _>(format!("{:?}", status).into());
+        while shiplift::Docker::new().info().await.is_err() {
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
     match ret {
@@ -422,7 +466,7 @@ async fn untar(slugs: BTreeMap<PathBuf, PathBuf>, tar: impl AsyncBufRead) -> Res
 
         let parent = path.parent().unwrap();
         let _ = fs::create_dir_all(&parent);
-        if let Ok(metadata) = fs::metadata(&path) {
+        if let Ok(metadata) = fs::symlink_metadata(&path) {
             let mut perms = metadata.permissions();
             perms.set_readonly(false);
             let _ = fs::set_permissions(&path, perms);
@@ -441,8 +485,8 @@ async fn untar(slugs: BTreeMap<PathBuf, PathBuf>, tar: impl AsyncBufRead) -> Res
                 "Could not unpack {:?}: {:?}\nmetadata: {:?}\nparent_metadata: {:?}",
                 path,
                 err,
-                path.metadata(),
-                parent.metadata()
+                path.symlink_metadata(),
+                parent.symlink_metadata()
             )
         });
     }
