@@ -77,9 +77,6 @@ struct CmdSave {
 /// load cache from s3
 #[argh(subcommand, name = "load")]
 struct CmdLoad {
-    #[argh(switch)]
-    /// clean docker images
-    clean: bool,
     #[argh(positional)]
     /// keys. will try from left to right
     keys: Vec<String>,
@@ -226,28 +223,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .await?;
                 println!("finished saving cache");
             }
-            Cmd_::Load(CmdLoad { clean, keys }) => {
-                if clean {
-                    if let Some(docker_dir) = &docker_dir {
-                        println!("Cleaning docker");
-                        // much quicker than: docker system prune -af --volumes
-                        // https://github.com/rust-lang/rust/blob/e100ec5bc7cd768ec17d75448b29c9ab4a39272b/src/bootstrap/clean.rs#L98-L114
-                        for entry in WalkDir::new(docker_dir).contents_first(true) {
-                            let entry = entry.unwrap();
-                            let path = entry.path();
-                            if path.components().next().is_none() {
-                                continue;
-                            }
-                            if let Ok(metadata) = fs::symlink_metadata(&path) {
-                                let mut perms = metadata.permissions();
-                                perms.set_readonly(false);
-                                let _ = fs::set_permissions(&path, perms);
-                            }
-                            let _ = fs::remove_file(path);
-                            let _ = fs::remove_dir(path);
-                        }
-                    }
-                }
+            Cmd_::Load(CmdLoad { keys }) => {
                 println!("fetching cache from: {:?}", keys);
                 for key in keys {
                     let key = format!("keys/{}.txt", key);
@@ -466,6 +442,7 @@ async fn untar(slugs: BTreeMap<PathBuf, PathBuf>, tar: impl AsyncBufRead) -> Res
 
         let parent = path.parent().unwrap();
         let _ = fs::create_dir_all(&parent);
+        // https://github.com/rust-lang/rust/blob/e100ec5bc7cd768ec17d75448b29c9ab4a39272b/src/bootstrap/clean.rs#L98-L114
         if let Ok(metadata) = fs::symlink_metadata(&path) {
             let mut perms = metadata.permissions();
             perms.set_readonly(false);
