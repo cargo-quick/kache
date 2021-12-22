@@ -323,7 +323,7 @@ where
         println!("Stopping docker");
         if cfg!(windows) {
             let mut docker_stop = process::Command::new("powershell");
-            docker_stop.args(["-command", "Stop-Service docker -Force"]);
+            docker_stop.args(["-command", "Stop-Service docker"]);
             let status = docker_stop.status().await?;
             if !status.success() {
                 return Err(format!("{:?}", status).into());
