@@ -15,19 +15,22 @@ use rusoto_credential::StaticProvider;
 use rusoto_s3::S3Client;
 use serde::Deserialize;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet, HashMap},
     env,
     error::Error,
     fs::{self, read_to_string},
     future::Future,
-    io, iter,
+    io, iter, panic,
     path::PathBuf,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
-use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf};
+use tokio::{
+    io::{AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf},
+    process,
+};
 use tokio_tar::EntryType;
 use walkdir::WalkDir;
 
@@ -57,7 +60,7 @@ struct Cmd {
 #[argh(subcommand)]
 enum Cmd_ {
     Save(CmdSave),
-    Uncache(CmdLoad),
+    Load(CmdLoad),
 }
 
 #[derive(FromArgs, Debug)]
@@ -78,6 +81,16 @@ struct CmdLoad {
     keys: Vec<String>,
 }
 
+#[derive(Deserialize)]
+struct Crates {
+    installs: HashMap<String, Install>,
+}
+
+#[derive(Deserialize)]
+struct Install {
+    bins: Vec<PathBuf>,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     env::set_var("RUST_BACKTRACE", "1");
@@ -85,144 +98,274 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let cmd: Cmd = argh::from_env();
 
-    let aws_config: AwsConfig = envy::prefixed("AWS_").from_env().unwrap();
-    let config: Config = envy::prefixed("KACHE_").from_env().unwrap();
+    let config = &envy::prefixed("KACHE_").from_env::<Config>().unwrap();
+    let s3_client = &{
+        let aws_config: AwsConfig = envy::prefixed("AWS_").from_env().unwrap();
 
-    let http_client = Arc::new(HttpClient::new().expect("failed to create request dispatcher"));
-    let creds = StaticProvider::new(
-        aws_config.access_key_id,
-        aws_config.secret_access_key,
-        None,
-        None,
-    );
-    let s3_client = &S3Client::new_with(http_client.clone(), creds.clone(), aws_config.region);
-
-    let bucket = &config.bucket;
+        let http_client = Arc::new(HttpClient::new().expect("failed to create request dispatcher"));
+        let creds = StaticProvider::new(
+            aws_config.access_key_id,
+            aws_config.secret_access_key,
+            None,
+            None,
+        );
+        S3Client::new_with(http_client, creds, aws_config.region)
+    };
 
     let target_dir = PathBuf::from("./target"); // TODO: actually deduce
     let cargo_home = home::cargo_home().unwrap();
+    let mut docker_dir = shiplift::Docker::new()
+        .info()
+        .await
+        .ok()
+        .map(|info| PathBuf::from(info.docker_root_dir));
+    if docker_dir.is_some() && cfg!(target_os = "macos") {
+        docker_dir = Some(
+            home::home_dir()
+                .unwrap()
+                .join("Library/Containers/com.docker.docker/Data/vms"),
+        );
+    }
+    let crates: Crates =
+        serde_json::from_slice(&fs::read(cargo_home.join(".crates2.json")).unwrap()).unwrap();
+    let cargo_bins = crates
+        .installs
+        .values()
+        .flat_map(|install| &install.bins)
+        .filter(|bin| bin.file_stem().unwrap() != "kache")
+        .collect::<BTreeSet<_>>();
 
-    match cmd.cmd {
-        Cmd_::Save(CmdSave { keys }) => {
-            println!("saving cache to: {:?}", keys);
-            let id: [u8; 16] = rand::random();
-            let id = base_x::encode(WEB_SAFE, &id);
-            let info_path = PathBuf::from(".kache-info");
-            let (id, cutoff) = match info_path.metadata() {
-                Ok(info) => {
-                    let parent_id = read_to_string(info_path).unwrap();
-                    let parent_id = parent_id.trim_end_matches('\n');
-                    (
-                        format!("{}:{}", parent_id, id),
-                        Some(info.modified().unwrap()),
-                    )
-                }
-                Err(_) => (id, None),
-            };
-            println!("packing {}", id);
-            let tar = tar(iter::empty()
-                .chain(walk(
-                    PathBuf::from("cargo").join("bin"),
-                    cargo_home.join("bin"),
-                    cutoff,
-                ))
-                .chain(walk(
-                    PathBuf::from("cargo").join("registry/index"),
-                    cargo_home.join("registry/index"),
-                    cutoff,
-                ))
-                .chain(walk(
-                    PathBuf::from("cargo").join("registry/cache"),
-                    cargo_home.join("registry/cache"),
-                    cutoff,
-                ))
-                .chain(walk(
-                    PathBuf::from("cargo").join("git/db"),
-                    cargo_home.join("git/db"),
-                    cutoff,
-                ))
-                .chain(walk(PathBuf::from("target"), target_dir, cutoff)));
-            aws::upload(
-                s3_client,
-                bucket.clone(),
-                format!("blobs/{}.tar.zst", id),
-                String::from("application/zstd"),
-                Some(31536000),
-                tar,
-            )
-            .await?;
-            let id = &id;
-            let _: Vec<()> = try_join_all(keys.into_iter().map(|key| async move {
-                let key = format!("keys/{}.txt", key);
+    stop_docker(|| async move {
+        match cmd.cmd {
+            Cmd_::Save(CmdSave { keys }) => {
+                println!("saving cache to: {:?}", keys);
+                let id: [u8; 16] = rand::random();
+                let id = base_x::encode(WEB_SAFE, &id);
+                let info_path = PathBuf::from(".kache-info");
+                let (id, cutoff) = match info_path.symlink_metadata() {
+                    Ok(info) => {
+                        let parent_id = read_to_string(info_path).unwrap();
+                        let parent_id = parent_id.trim_end_matches('\n');
+                        (
+                            format!("{}:{}", parent_id, id),
+                            Some(info.modified().unwrap()),
+                        )
+                    }
+                    Err(_) => (id, None),
+                };
+                println!("packing {}", id);
+                let tar = tar(iter::empty()
+                    .chain(walk(
+                        PathBuf::from("cargo").join(".crates.toml"),
+                        cargo_home.join(".crates.toml"),
+                        cutoff,
+                    ))
+                    .chain(walk(
+                        PathBuf::from("cargo").join(".crates2.json"),
+                        cargo_home.join(".crates2.json"),
+                        cutoff,
+                    ))
+                    .chain(cargo_bins.into_iter().flat_map(|bin| {
+                        walk(
+                            PathBuf::from("cargo").join("bin").join(&bin),
+                            cargo_home.join("bin").join(bin),
+                            cutoff,
+                        )
+                    }))
+                    .chain(walk(
+                        PathBuf::from("cargo").join("registry/index"),
+                        cargo_home.join("registry/index"),
+                        cutoff,
+                    ))
+                    .chain(walk(
+                        PathBuf::from("cargo").join("registry/cache"),
+                        cargo_home.join("registry/cache"),
+                        cutoff,
+                    ))
+                    .chain(walk(
+                        PathBuf::from("cargo").join("git/db"),
+                        cargo_home.join("git/db"),
+                        cutoff,
+                    ))
+                    .chain(walk(PathBuf::from("target"), target_dir, cutoff))
+                    .chain(
+                        docker_dir
+                            .as_ref()
+                            .map(|docker_dir| {
+                                walk(PathBuf::from("docker"), docker_dir.clone(), cutoff)
+                            })
+                            .into_iter()
+                            .flatten(),
+                    ));
                 aws::upload(
                     s3_client,
-                    bucket.clone(),
-                    key,
-                    String::from("text/plain"),
-                    Some(600),
-                    id.as_bytes(),
+                    config.bucket.clone(),
+                    format!("blobs/{}.tar.zst", id),
+                    String::from("application/zstd"),
+                    Some(31536000),
+                    tar,
                 )
-                .await
-            }))
-            .await?;
-            println!("finished saving cache");
-        }
-        Cmd_::Uncache(CmdLoad { keys }) => {
-            println!("fetching cache from: {:?}", keys);
-            for key in keys {
-                let key = format!("keys/{}.txt", key);
-                if let Ok(mut id_) = aws::download(s3_client, bucket.clone(), key.clone()).await {
-                    // Assumption: if this id is listed in s3 under this cache key then the underlying blobs *must* still exist.
-                    let mut id = String::new();
-                    let _ = id_.read_to_string(&mut id).await?;
-                    println!("cache hit: {} -> {}", key, id);
-                    let ids = id
-                        .match_indices(':')
-                        .map(|(index, _)| &id[..index])
-                        .chain(std::iter::once(id.as_ref()));
-                    for id in ids {
-                        let blob_id = format!("blobs/{}.tar.zst", id);
-                        println!("unpacking {}", blob_id);
-                        let tar = aws::download(s3_client, bucket.clone(), blob_id).await?;
-                        untar(
-                            vec![
-                                (PathBuf::from("cargo").join("bin"), cargo_home.join("bin")),
-                                (
-                                    PathBuf::from("cargo").join("registry/index"),
-                                    cargo_home.join("registry/index"),
-                                ),
-                                (
-                                    PathBuf::from("cargo").join("registry/cache"),
-                                    cargo_home.join("registry/cache"),
-                                ),
-                                (
-                                    PathBuf::from("cargo").join("git/db"),
-                                    cargo_home.join("git/db"),
-                                ),
-                                (PathBuf::from("target"), target_dir.clone()),
-                            ]
-                            .into_iter()
-                            .collect(),
-                            tar,
-                        )
-                        .await?;
-                    }
-                    fs::write(".kache-info", id).unwrap();
-                    println!("Finished unpacking cache");
-                    return Ok(());
-                }
+                .await?;
+                let id = &id;
+                let _: Vec<()> = try_join_all(keys.into_iter().map(|key| async move {
+                    let key = format!("keys/{}.txt", key);
+                    aws::upload(
+                        s3_client,
+                        config.bucket.clone(),
+                        key,
+                        String::from("text/plain"),
+                        Some(600),
+                        id.as_bytes(),
+                    )
+                    .await
+                }))
+                .await?;
+                println!("finished saving cache");
             }
-            println!("cache miss :(");
+            Cmd_::Load(CmdLoad { keys }) => {
+                println!("fetching cache from: {:?}", keys);
+                for key in keys {
+                    let key = format!("keys/{}.txt", key);
+                    if let Ok(mut id_) =
+                        aws::download(s3_client, config.bucket.clone(), key.clone()).await
+                    {
+                        // Assumption: if this id is listed in s3 under this cache key then the underlying blobs *must* still exist.
+                        let mut id = String::new();
+                        let _ = id_.read_to_string(&mut id).await?;
+                        println!("cache hit: {} -> {}", key, id);
+                        let ids = id
+                            .match_indices(':')
+                            .map(|(index, _)| &id[..index])
+                            .chain(std::iter::once(id.as_ref()));
+                        for id in ids {
+                            let blob_id = format!("blobs/{}.tar.zst", id);
+                            println!("unpacking {}", blob_id);
+                            let tar =
+                                aws::download(s3_client, config.bucket.clone(), blob_id).await?;
+                            untar(
+                                [
+                                    (
+                                        PathBuf::from("cargo").join(".crates.toml"),
+                                        cargo_home.join(".crates.toml"),
+                                    ),
+                                    (
+                                        PathBuf::from("cargo").join(".crates2.json"),
+                                        cargo_home.join(".crates2.json"),
+                                    ),
+                                    (PathBuf::from("cargo").join("bin"), cargo_home.join("bin")),
+                                    (
+                                        PathBuf::from("cargo").join("registry/index"),
+                                        cargo_home.join("registry/index"),
+                                    ),
+                                    (
+                                        PathBuf::from("cargo").join("registry/cache"),
+                                        cargo_home.join("registry/cache"),
+                                    ),
+                                    (
+                                        PathBuf::from("cargo").join("git/db"),
+                                        cargo_home.join("git/db"),
+                                    ),
+                                    (PathBuf::from("target"), target_dir.clone()),
+                                ]
+                                .into_iter()
+                                .chain(docker_dir.as_ref().map(|docker_dir| {
+                                    (PathBuf::from("docker"), docker_dir.clone())
+                                }))
+                                .collect(),
+                                tar,
+                            )
+                            .await?;
+                        }
+                        fs::write(".kache-info", id).unwrap();
+                        println!("Finished unpacking cache");
+                        return Ok(());
+                    }
+                }
+                println!("cache miss :(");
+            }
+        }
+        Ok(())
+    })
+    .await?
+}
+
+async fn stop_docker<F, O>(f: impl FnOnce() -> F) -> Result<O, Box<dyn Error>>
+where
+    F: Future<Output = O>,
+{
+    let has_docker = shiplift::Docker::new().info().await.is_ok();
+    if has_docker {
+        println!("Stopping docker");
+        if cfg!(windows) {
+            let mut docker_stop = process::Command::new("powershell");
+            docker_stop.args(["-command", "Stop-Service docker"]);
+            let status = docker_stop.status().await?;
+            if !status.success() {
+                return Err(format!("{:?}", status).into());
+            }
+        } else if cfg!(target_os = "linux") {
+            let mut docker_stop = process::Command::new("sudo");
+            docker_stop.args(["systemctl", "stop", "docker"]);
+            let status = docker_stop.status().await?;
+            if !status.success() {
+                return Err(format!("{:?}", status).into());
+            }
+        } else if cfg!(target_os = "macos") {
+            let mut docker_stop = process::Command::new("osascript");
+            docker_stop.args(["-e", "quit app \"Docker\""]);
+            let status = docker_stop.status().await?;
+            if !status.success() {
+                return Err(format!("{:?}", status).into());
+            }
+        } else {
+            unimplemented!();
+        }
+        while shiplift::Docker::new().info().await.is_ok() {
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
-    Ok(())
+    let ret = panic::AssertUnwindSafe(f()).catch_unwind().await;
+    if has_docker {
+        println!("Starting docker");
+        if cfg!(windows) {
+            let mut docker_stop = process::Command::new("powershell");
+            docker_stop.args(["-command", "Start-Service docker"]); // TODO: wait till it's listening before returning
+            let status = docker_stop.status().await?;
+            if !status.success() {
+                return Err::<O, _>(format!("{:?}", status).into());
+            }
+        } else if cfg!(target_os = "linux") {
+            let mut docker_stop = process::Command::new("sudo");
+            docker_stop.args(["systemctl", "start", "docker"]);
+            let status = docker_stop.status().await?;
+            if !status.success() {
+                return Err::<O, _>(format!("{:?}", status).into());
+            }
+        } else if cfg!(target_os = "macos") {
+            let mut docker_stop = process::Command::new("open");
+            docker_stop.args(["-a", "Docker"]);
+            let status = docker_stop.status().await?;
+            if !status.success() {
+                return Err(format!("{:?}", status).into());
+            }
+        } else {
+            unimplemented!();
+        }
+        while shiplift::Docker::new().info().await.is_err() {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+    match ret {
+        Ok(ret) => Ok(ret),
+        Err(e) => panic::resume_unwind(e),
+    }
 }
 
 fn walk(
     slug: PathBuf,
     base: PathBuf,
     cutoff: Option<SystemTime>,
-) -> impl Iterator<Item = (PathBuf, PathBuf, PathBuf)> {
+) -> impl Iterator<Item = (PathBuf, PathBuf, Option<PathBuf>)> {
     WalkDir::new(&base)
         .sort_by(|a, b| a.file_name().cmp(b.file_name()))
         .into_iter()
@@ -231,8 +374,8 @@ fn walk(
             let t = entry.file_type();
             let path = entry.path().strip_prefix(&base).unwrap().to_owned();
             let non_empty = path.components().next().is_some();
-            if non_empty
-                && (t.is_file() || t.is_symlink() || t.is_dir())
+            let path = non_empty.then(|| path);
+            if (t.is_file() || t.is_symlink() || t.is_dir())
                 && cutoff
                     .map(|cutoff| cutoff < entry.metadata().unwrap().modified().unwrap())
                     .unwrap_or(true)
@@ -244,7 +387,7 @@ fn walk(
         })
 }
 
-fn tar(paths: impl Iterator<Item = (PathBuf, PathBuf, PathBuf)>) -> impl AsyncRead {
+fn tar(paths: impl Iterator<Item = (PathBuf, PathBuf, Option<PathBuf>)>) -> impl AsyncRead {
     let (writer, reader) = async_pipe::pipe();
     let task = async move {
         // create a .tar.zsd
@@ -256,12 +399,17 @@ fn tar(paths: impl Iterator<Item = (PathBuf, PathBuf, PathBuf)>) -> impl AsyncRe
         let tar_ = ZstdEncoder::with_quality(writer, Level::Fastest);
         let mut tar_ = tokio_tar::Builder::new(tar_);
         tar_.mode(tokio_tar::HeaderMode::Complete);
+        tar_.follow_symlinks(false);
 
-        // add resources (check for docker images) to tar
-        for (slug, base, relative) in paths {
-            tar_.append_path_with_name(base.join(&relative), slug.join(&relative))
+        // add resources to tar
+        for (mut slug, mut base, relative) in paths {
+            if let Some(relative) = relative {
+                base = base.join(&relative);
+                slug = slug.join(&relative);
+            }
+            tar_.append_path_with_name(base.clone(), slug)
                 .await
-                .unwrap();
+                .unwrap_or_else(|e| panic!("can't tar {}: {:?}", base.display(), e));
         }
 
         // flush writers
@@ -289,39 +437,34 @@ async fn untar(slugs: BTreeMap<PathBuf, PathBuf>, tar: impl AsyncBufRead) -> Res
         let mut entry = entry.unwrap();
         let path = entry.path().unwrap().into_owned();
 
-        if path.file_stem().unwrap() == "kache" {
-            // Don't replace ourselves - the version in cache may be stale
-            continue;
-        }
-
         let path = apply_transform(path, &slugs);
 
         let parent = path.parent().unwrap();
         let _ = fs::create_dir_all(&parent);
-        if entry.header().entry_type() == EntryType::Directory {
-            let _ = mtimes.insert(path.clone(), entry.header().mtime().unwrap());
+        // https://github.com/rust-lang/rust/blob/e100ec5bc7cd768ec17d75448b29c9ab4a39272b/src/bootstrap/clean.rs#L98-L114
+        if let Ok(metadata) = fs::symlink_metadata(&path) {
+            let mut perms = metadata.permissions();
+            perms.set_readonly(false);
+            let _ = fs::set_permissions(&path, perms);
         }
-        entry
-            .unpack(&path)
-            .await
-            .map(drop)
-            .unwrap_or_else(|err| match err.kind() {
-                io::ErrorKind::PermissionDenied if path.exists() => {
-                    println!(
-                        "permission denied writing to preexisting {:?} - skipping",
-                        path
-                    )
-                }
-                _ => {
-                    panic!(
-                        "Could not unpack {:?}: {:?}\nmetadata: {:?}\nparent_metadata: {:?}",
-                        path,
-                        err,
-                        path.metadata(),
-                        parent.metadata()
-                    )
-                }
-            });
+        let _ = fs::remove_file(&path);
+        match entry.header().entry_type() {
+            EntryType::Directory => {
+                let _ = mtimes.insert(path.clone(), entry.header().mtime().unwrap());
+            }
+            _ => {
+                let _ = fs::remove_dir_all(&path);
+            }
+        }
+        entry.unpack(&path).await.map(drop).unwrap_or_else(|err| {
+            panic!(
+                "Could not unpack {:?}: {:?}\nmetadata: {:?}\nparent_metadata: {:?}",
+                path,
+                err,
+                path.symlink_metadata(),
+                parent.symlink_metadata()
+            )
+        });
     }
 
     for (path, mtime) in mtimes.into_iter().rev() {
@@ -339,7 +482,12 @@ fn apply_transform(path: PathBuf, slugs: &BTreeMap<PathBuf, PathBuf>) -> PathBuf
     // Iterate in reverse order. This should visit more specific slugs first.
     for (slug, base) in slugs.iter().rev() {
         if let Ok(path) = path.strip_prefix(slug) {
-            return base.join(path);
+            let mut base = base.clone();
+            let non_empty = path.components().next().is_some();
+            if non_empty {
+                base = base.join(path);
+            }
+            return base;
         }
     }
     panic!("{:?} does not match anything in {:?}", path, slugs);
