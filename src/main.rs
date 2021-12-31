@@ -18,13 +18,11 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     env,
     error::Error,
-    ffi::OsString,
     fs::{self, read_to_string},
     future::Future,
     io, iter, panic,
     path::PathBuf,
     pin::Pin,
-    process::Stdio,
     sync::Arc,
     task::{Context, Poll},
     time::{Duration, SystemTime},
@@ -115,7 +113,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
 
     let cwd = PathBuf::from(".");
-    let is_in_git_repo = is_in_git_repo().await.unwrap_or(false);
     let cargo_home = home::cargo_home().unwrap();
     let mut docker_dir = shiplift::Docker::new()
         .info()
@@ -190,11 +187,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         cargo_home.join("git/db"),
                         cutoff,
                     ))
-                    .chain(walk(PathBuf::from("cwd"), cwd, cutoff).filter(
-                        |(_slug, _base, path)| {
-                            path.as_ref().map_or(true, |path| !path.starts_with(".git"))
-                        },
-                    ))
+                    .chain(walk(PathBuf::from("cwd"), cwd, cutoff))
                     .chain(
                         docker_dir
                             .as_ref()
@@ -240,14 +233,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         let mut id = String::new();
                         let _ = id_.read_to_string(&mut id).await?;
                         println!("cache hit: {} -> {}", key, id);
-                        if is_in_git_repo {
-                            if let Err(dirty) = is_git_clean().await {
-                                todo!(
-                                    "not yet implemented for restoring to an unclean git repo: {}",
-                                    dirty
-                                );
-                            }
-                        }
                         let ids = id
                             .match_indices(':')
                             .map(|(index, _)| &id[..index])
@@ -291,32 +276,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             )
                             .await?;
                         }
-                        if is_in_git_repo {
-                            let _ = git(&["checkout", "--", "."]).await;
-                            let _ = git(&["clean", "-ff", "--", "."]).await;
-                            let _ = git(&[
-                                "submodule",
-                                "foreach",
-                                "--recursive",
-                                "git",
-                                "checkout",
-                                "--",
-                                ".",
-                            ])
-                            .await;
-                            let _ = git(&[
-                                "submodule",
-                                "foreach",
-                                "--recursive",
-                                "git",
-                                "clean",
-                                "-ff",
-                                "--",
-                                ".",
-                            ])
-                            .await;
-                            is_git_clean().await.unwrap();
-                        }
                         fs::write(".kache-info", id).unwrap();
                         println!("Finished unpacking cache");
                         return Ok(());
@@ -328,46 +287,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Ok(())
     })
     .await?
-}
-
-/// Returns Err if `git` isn't available
-async fn is_in_git_repo() -> Result<bool, Box<dyn Error>> {
-    let (success, _stdout) = try_git(&["rev-parse"]).await?;
-    Ok(success)
-}
-
-async fn is_git_clean() -> Result<(), String> {
-    let (success, stdout) = git(&["status", "--porcelain"]).await;
-    assert!(success);
-    if stdout.is_empty() {
-        Ok(())
-    } else {
-        Err(format!("git dirty:\n{}", String::from_utf8_lossy(&stdout)))
-    }
-}
-
-async fn git(args: &[&str]) -> (bool, Vec<u8>) {
-    try_git(args).await.unwrap()
-}
-
-/// Returns Err if `git` isn't available
-async fn try_git(args: &[&str]) -> Result<(bool, Vec<u8>), Box<dyn Error>> {
-    let git = env::var_os("GIT").unwrap_or_else(|| OsString::from("git"));
-    let mut git = tokio::process::Command::new(git);
-    let _ = git.args(args);
-    let mut git = git
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()?;
-    let mut buf = Vec::new();
-    git.stdout
-        .take()
-        .unwrap()
-        .read_to_end(&mut buf)
-        .await
-        .unwrap();
-    let output = git.wait().await.unwrap();
-    Ok((output.success(), buf))
 }
 
 async fn stop_docker<F, O>(f: impl FnOnce() -> F) -> Result<O, Box<dyn Error>>
