@@ -112,7 +112,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         S3Client::new_with(http_client, creds, aws_config.region)
     };
 
-    let target_dir = PathBuf::from("./target"); // TODO: actually deduce
+    let cwd = PathBuf::from(".");
     let cargo_home = home::cargo_home().unwrap();
     let mut docker_dir = shiplift::Docker::new()
         .info()
@@ -187,7 +187,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         cargo_home.join("git/db"),
                         cutoff,
                     ))
-                    .chain(walk(PathBuf::from("target"), target_dir, cutoff))
+                    .chain(walk(PathBuf::from("cwd"), cwd, cutoff))
                     .chain(
                         docker_dir
                             .as_ref()
@@ -265,7 +265,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         PathBuf::from("cargo").join("git/db"),
                                         cargo_home.join("git/db"),
                                     ),
-                                    (PathBuf::from("target"), target_dir.clone()),
+                                    (PathBuf::from("cwd"), cwd.clone()),
                                 ]
                                 .into_iter()
                                 .chain(docker_dir.as_ref().map(|docker_dir| {
