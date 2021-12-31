@@ -1,6 +1,8 @@
 #!/bin/bash
 set -euxo pipefail
 
+RUST_TOOLCHAIN=nightly-2021-12-08
+
 # Shamelessly stolen from https://github.com/alsuren/cargo-quickinstall/blob/main/build-version.sh
 
 cd "$(dirname "$0")/.."
@@ -17,7 +19,10 @@ fi
 
 TARGET_ARCH=$(rustc --version --verbose | sed -n 's/host: //p')
 
-cargo install --path=.
+rustc "+$RUST_TOOLCHAIN" -Vv
+cargo "+$RUST_TOOLCHAIN" -V
+
+cargo "+$RUST_TOOLCHAIN" install --path=.
 
 BINARIES=$(
     cat ~/.cargo/.crates2.json | jq -r '

@@ -11,8 +11,8 @@ Install kache from github releases:
 ```bash
 set -euxo pipefail
 
-CARGO_BIN_DIR="$(dirname "$(which cargo)")"
-TARGET_ARCH="$(rustc --version --verbose | sed -n 's/host: //p')"
+CARGO_BIN_DIR=$(dirname "$(which cargo)")
+TARGET_ARCH=$(rustc --version --verbose | sed -n 's/host: //p')
 
 curl \
     --user-agent "github actions build script for $GITHUB_REPOSITORY" \
@@ -20,7 +20,7 @@ curl \
     --silent \
     --show-error \
     --fail \
-    "https://github.com/cargo-quick/kache/releases/download/v0.1.4/kache-v0.1.4-${TARGET_ARCH}.tar.gz" \
+    "https://github.com/cargo-quick/kache/releases/download/v0.1.5/kache-v0.1.5-${TARGET_ARCH}.tar.gz" \
     | tar -xzvvf - -C "$CARGO_BIN_DIR"
 ```
 
