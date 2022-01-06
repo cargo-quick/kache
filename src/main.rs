@@ -19,6 +19,7 @@ use std::{
 };
 use tokio::io::AsyncReadExt;
 
+use docker::stop_docker;
 use tar::{tar, untar, walk};
 
 const WEB_SAFE: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_~";
@@ -144,7 +145,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         .filter(|bin| bin.file_stem().unwrap() != "kache")
         .collect::<BTreeSet<_>>();
 
-    docker::stop_docker(|| async move {
+    stop_docker(|| async move {
         match cmd.cmd {
             Cmd_::Save(CmdSave {
                 overwrite,
@@ -158,7 +159,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 let mut keys: Vec<String> = stream::iter(keys)
                     .filter(|k| {
                         let k = k.clone();
-                        async move { !has_cache_key(s3_client, config.bucket.clone(), k).await }
+                        async move { !has_cache_key(s3_client, &config.bucket, &k).await }
                     })
                     .collect()
                     .await;
@@ -259,9 +260,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             Cmd_::Load(CmdLoad { keys }) => {
                 println!("fetching cache from: {:?}", keys);
                 for key in keys {
-                    if let Ok(id) =
-                        get_cache_key(s3_client, config.bucket.clone(), key.clone()).await
-                    {
+                    if let Ok(id) = get_blob_id(s3_client, &config.bucket, &key).await {
                         // Assumption: if this id is listed in s3 under this cache key then the underlying blobs *must* still exist.
                         println!("cache hit: {} -> {}", key, id);
                         let ids = id
@@ -320,20 +319,20 @@ async fn run() -> Result<(), Box<dyn Error>> {
     .await?
 }
 
-async fn get_cache_key(
+async fn get_blob_id(
     s3_client: &S3Client,
-    bucket: String,
-    key: String,
+    bucket: &str,
+    key: &str,
 ) -> Result<String, Box<dyn Error>> {
     let key = format!("keys/{}.txt", key);
-    let mut id_file = aws::download(s3_client, bucket, key).await?;
+    let mut id_file = aws::download(s3_client, bucket.to_string(), key).await?;
     let mut id = String::new();
     let _ = id_file.read_to_string(&mut id).await?;
     Ok(id)
 }
 
-async fn has_cache_key(s3_client: &S3Client, bucket: String, key: String) -> bool {
-    get_cache_key(s3_client, bucket, key).await.is_ok()
+async fn has_cache_key(s3_client: &S3Client, bucket: &str, key: &str) -> bool {
+    get_blob_id(s3_client, bucket, key).await.is_ok()
 }
 
 #[cfg(test)]
