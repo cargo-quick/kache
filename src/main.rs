@@ -166,7 +166,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 keys.extend(overwrite);
 
                 if layered.is_empty() && keys.is_empty() {
-                    println!("nothing to do. All keys already exist.");
+                    println!("Nothing to do. All keys already exist.");
                     return Ok(());
                 }
 
