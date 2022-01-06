@@ -18,11 +18,17 @@ use tokio::io::{AsyncBufRead, AsyncRead, AsyncWriteExt, ReadBuf};
 use tokio_tar::EntryType;
 use walkdir::WalkDir;
 
+pub struct FilePathInfo {
+    slug: PathBuf,
+    base: PathBuf,
+    relative: Option<PathBuf>,
+}
+
 pub fn walk(
     slug: PathBuf,
     base: PathBuf,
     cutoff: Option<SystemTime>,
-) -> impl Iterator<Item = (PathBuf, PathBuf, Option<PathBuf>)> {
+) -> impl Iterator<Item = FilePathInfo> {
     WalkDir::new(&base)
         .sort_by(|a, b| a.file_name().cmp(b.file_name()))
         .into_iter()
@@ -37,14 +43,18 @@ pub fn walk(
                     .map(|cutoff| cutoff < entry.metadata().unwrap().modified().unwrap())
                     .unwrap_or(true)
             {
-                Some((slug.clone(), base.clone(), path))
+                Some(FilePathInfo {
+                    slug: slug.clone(),
+                    base: base.clone(),
+                    relative: path,
+                })
             } else {
                 None
             }
         })
 }
 
-pub fn tar(paths: impl Iterator<Item = (PathBuf, PathBuf, Option<PathBuf>)>) -> impl AsyncRead {
+pub fn tar(paths: impl Iterator<Item = FilePathInfo>) -> impl AsyncRead {
     let (writer, reader) = async_pipe::pipe();
     let task = async move {
         // create a .tar.zsd
@@ -59,7 +69,12 @@ pub fn tar(paths: impl Iterator<Item = (PathBuf, PathBuf, Option<PathBuf>)>) -> 
         tar_.follow_symlinks(false);
 
         // add resources to tar
-        for (mut slug, mut base, relative) in paths {
+        for FilePathInfo {
+            mut slug,
+            mut base,
+            relative,
+        } in paths
+        {
             if let Some(relative) = relative {
                 base = base.join(&relative);
                 slug = slug.join(&relative);
