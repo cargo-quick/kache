@@ -3,7 +3,7 @@ mod docker;
 mod tar;
 
 use argh::FromArgs;
-use futures::future::try_join_all;
+use futures::{future::try_join_all, stream, StreamExt};
 use rusoto_core::{HttpClient, Region};
 use rusoto_credential::StaticProvider;
 use rusoto_s3::S3Client;
@@ -54,17 +54,31 @@ enum Cmd_ {
 /// save cache to s3
 #[argh(subcommand, name = "save")]
 struct CmdSave {
+    /// keys to upload to.
+    /// Will upload to all non-existent keys.
     #[argh(positional)]
-    /// keys
     keys: Vec<String>,
+
+    /// push a layered tarball to this key.
+    /// Will overwrite these keys with a chain of tarballs containing any added/modified
+    /// files (WARNING: this never deletes files, so this will probably break things).
+    #[argh(option)]
+    layered: Vec<String>,
+
+    /// overwrite the contents of this key, even if it already exists.
+    /// Note that if you repeatedly pull from a key and re-push to it then you will
+    /// gradually accumulate cruft, so you will want a strategy to stop cruft from
+    /// building up. Rotating your cache key every week is one approach to this problem.
+    #[argh(option)]
+    overwrite: Vec<String>,
 }
 
 #[derive(FromArgs, Debug)]
 /// load cache from s3
 #[argh(subcommand, name = "load")]
 struct CmdLoad {
+    /// keys to download from. Will try from left to right, and stop when it gets a hit.
     #[argh(positional)]
-    /// keys. will try from left to right
     keys: Vec<String>,
 }
 
@@ -78,8 +92,16 @@ struct Install {
     bins: Vec<PathBuf>,
 }
 
+fn count_nonempty(lists: &[&Vec<String>]) -> usize {
+    lists.iter().map(|l| (!l.is_empty()) as usize).sum()
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    run().await
+}
+
+async fn run() -> Result<(), Box<dyn Error>> {
     env::set_var("RUST_BACKTRACE", "1");
     dotenv::dotenv().ok();
 
@@ -124,21 +146,46 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     docker::stop_docker(|| async move {
         match cmd.cmd {
-            Cmd_::Save(CmdSave { keys }) => {
+            Cmd_::Save(CmdSave {
+                overwrite,
+                layered,
+                keys,
+            }) => {
+                assert!(
+                    count_nonempty(&[&overwrite, &layered, &keys]) == 1,
+                    "mixing --overwrite, --layered and normal keys is not supported yet",
+                );
+                let mut keys: Vec<String> = stream::iter(keys)
+                    .filter(|k| {
+                        let k = k.clone();
+                        async move { !has_cache_key(s3_client, config.bucket.clone(), k).await }
+                    })
+                    .collect()
+                    .await;
+
+                keys.extend(overwrite);
+
+                if layered.is_empty() && keys.is_empty() {
+                    println!("nothing to do. All keys already exist.");
+                    return Ok(());
+                }
+
                 println!("saving cache to: {:?}", keys);
                 let id: [u8; 16] = rand::random();
                 let id = base_x::encode(WEB_SAFE, &id);
                 let info_path = PathBuf::from(".kache-info");
-                let (id, cutoff) = match info_path.symlink_metadata() {
-                    Ok(info) => {
+                let (keys, id, cutoff) = match (info_path.symlink_metadata(), layered.is_empty()) {
+                    (Ok(info), false) => {
                         let parent_id = read_to_string(info_path).unwrap();
                         let parent_id = parent_id.trim_end_matches('\n');
                         (
+                            layered,
                             format!("{}:{}", parent_id, id),
                             Some(info.modified().unwrap()),
                         )
                     }
-                    Err(_) => (id, None),
+                    (Err(_), false) => (layered, id, None),
+                    (_, true) => (keys, id, None),
                 };
                 println!("packing {}", id);
                 let tar = tar(iter::empty()
@@ -213,12 +260,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 println!("fetching cache from: {:?}", keys);
                 for key in keys {
                     let key = format!("keys/{}.txt", key);
-                    if let Ok(mut id_) =
-                        aws::download(s3_client, config.bucket.clone(), key.clone()).await
+                    if let Ok(id) =
+                        get_cache_key(s3_client, config.bucket.clone(), key.clone()).await
                     {
                         // Assumption: if this id is listed in s3 under this cache key then the underlying blobs *must* still exist.
-                        let mut id = String::new();
-                        let _ = id_.read_to_string(&mut id).await?;
                         println!("cache hit: {} -> {}", key, id);
                         let ids = id
                             .match_indices(':')
@@ -274,6 +319,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Ok(())
     })
     .await?
+}
+
+async fn get_cache_key(
+    s3_client: &S3Client,
+    bucket: String,
+    key: String,
+) -> Result<String, Box<dyn Error>> {
+    let mut id_file = aws::download(s3_client, bucket, key).await?;
+    let mut id = String::new();
+    let _ = id_file.read_to_string(&mut id).await?;
+    Ok(id)
+}
+
+async fn has_cache_key(s3_client: &S3Client, bucket: String, key: String) -> bool {
+    get_cache_key(s3_client, bucket, key).await.is_ok()
 }
 
 #[cfg(test)]
