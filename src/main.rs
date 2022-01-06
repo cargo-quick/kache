@@ -1,38 +1,26 @@
 mod aws;
+mod docker;
+mod tar;
 
 use argh::FromArgs;
-use async_compression::{
-    tokio::{bufread::ZstdDecoder, write::ZstdEncoder},
-    Level,
-};
-use futures::{
-    future::{try_join_all, Fuse},
-    FutureExt, StreamExt,
-};
-use pin_project::pin_project;
+use futures::{future::try_join_all, stream, StreamExt};
 use rusoto_core::{HttpClient, Region};
 use rusoto_credential::StaticProvider;
 use rusoto_s3::S3Client;
 use serde::Deserialize;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap},
     env,
     error::Error,
     fs::{self, read_to_string},
-    future::Future,
-    io, iter, panic,
+    iter,
     path::PathBuf,
-    pin::Pin,
     sync::Arc,
-    task::{Context, Poll},
-    time::{Duration, SystemTime},
 };
-use tokio::{
-    io::{AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf},
-    process,
-};
-use tokio_tar::EntryType;
-use walkdir::WalkDir;
+use tokio::io::AsyncReadExt;
+
+use docker::stop_docker;
+use tar::{tar, untar, walk};
 
 const WEB_SAFE: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_~";
 
@@ -67,17 +55,31 @@ enum Cmd_ {
 /// save cache to s3
 #[argh(subcommand, name = "save")]
 struct CmdSave {
+    /// keys to upload to.
+    /// Will upload to all non-existent keys.
     #[argh(positional)]
-    /// keys
     keys: Vec<String>,
+
+    /// push a layered tarball to this key.
+    /// Will overwrite these keys with a chain of tarballs containing any added/modified
+    /// files (WARNING: this never deletes files, so this will probably break things).
+    #[argh(option)]
+    layered: Vec<String>,
+
+    /// overwrite the contents of this key, even if it already exists.
+    /// Note that if you repeatedly pull from a key and re-push to it then you will
+    /// gradually accumulate cruft, so you will want a strategy to stop cruft from
+    /// building up. Rotating your cache key every week is one approach to this problem.
+    #[argh(option)]
+    overwrite: Vec<String>,
 }
 
 #[derive(FromArgs, Debug)]
 /// load cache from s3
 #[argh(subcommand, name = "load")]
 struct CmdLoad {
+    /// keys to download from. Will try from left to right, and stop when it gets a hit.
     #[argh(positional)]
-    /// keys. will try from left to right
     keys: Vec<String>,
 }
 
@@ -91,8 +93,16 @@ struct Install {
     bins: Vec<PathBuf>,
 }
 
+fn count_nonempty(lists: &[&Vec<String>]) -> usize {
+    lists.iter().map(|l| (!l.is_empty()) as usize).sum()
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    run().await
+}
+
+async fn run() -> Result<(), Box<dyn Error>> {
     env::set_var("RUST_BACKTRACE", "1");
     dotenv::dotenv().ok();
 
@@ -137,21 +147,46 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     stop_docker(|| async move {
         match cmd.cmd {
-            Cmd_::Save(CmdSave { keys }) => {
+            Cmd_::Save(CmdSave {
+                overwrite,
+                layered,
+                keys,
+            }) => {
+                assert!(
+                    count_nonempty(&[&overwrite, &layered, &keys]) == 1,
+                    "mixing --overwrite, --layered and normal keys is not supported yet",
+                );
+                let mut keys: Vec<String> = stream::iter(keys)
+                    .filter(|k| {
+                        let k = k.clone();
+                        async move { !has_cache_key(s3_client, &config.bucket, &k).await }
+                    })
+                    .collect()
+                    .await;
+
+                keys.extend(overwrite);
+
+                if layered.is_empty() && keys.is_empty() {
+                    println!("Nothing to do. All keys already exist.");
+                    return Ok(());
+                }
+
                 println!("saving cache to: {:?}", keys);
                 let id: [u8; 16] = rand::random();
                 let id = base_x::encode(WEB_SAFE, &id);
                 let info_path = PathBuf::from(".kache-info");
-                let (id, cutoff) = match info_path.symlink_metadata() {
-                    Ok(info) => {
+                let (keys, id, cutoff) = match (info_path.symlink_metadata(), layered.is_empty()) {
+                    (Ok(info), false) => {
                         let parent_id = read_to_string(info_path).unwrap();
                         let parent_id = parent_id.trim_end_matches('\n');
                         (
+                            layered,
                             format!("{}:{}", parent_id, id),
                             Some(info.modified().unwrap()),
                         )
                     }
-                    Err(_) => (id, None),
+                    (Err(_), false) => (layered, id, None),
+                    (_, true) => (keys, id, None),
                 };
                 println!("packing {}", id);
                 let tar = tar(iter::empty()
@@ -225,13 +260,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             Cmd_::Load(CmdLoad { keys }) => {
                 println!("fetching cache from: {:?}", keys);
                 for key in keys {
-                    let key = format!("keys/{}.txt", key);
-                    if let Ok(mut id_) =
-                        aws::download(s3_client, config.bucket.clone(), key.clone()).await
-                    {
+                    if let Ok(id) = get_blob_id(s3_client, &config.bucket, &key).await {
                         // Assumption: if this id is listed in s3 under this cache key then the underlying blobs *must* still exist.
-                        let mut id = String::new();
-                        let _ = id_.read_to_string(&mut id).await?;
                         println!("cache hit: {} -> {}", key, id);
                         let ids = id
                             .match_indices(':')
@@ -289,245 +319,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
     .await?
 }
 
-async fn stop_docker<F, O>(f: impl FnOnce() -> F) -> Result<O, Box<dyn Error>>
-where
-    F: Future<Output = O>,
-{
-    let has_docker = shiplift::Docker::new().info().await.is_ok();
-    if has_docker {
-        println!("Stopping docker");
-        if cfg!(windows) {
-            let mut docker_stop = process::Command::new("powershell");
-            docker_stop.args(["-command", "Stop-Service docker"]);
-            let status = docker_stop.status().await?;
-            if !status.success() {
-                return Err(format!("{:?}", status).into());
-            }
-        } else if cfg!(target_os = "linux") {
-            let mut docker_stop = process::Command::new("sudo");
-            docker_stop.args(["systemctl", "stop", "docker"]);
-            let status = docker_stop.status().await?;
-            if !status.success() {
-                return Err(format!("{:?}", status).into());
-            }
-        } else if cfg!(target_os = "macos") {
-            let mut docker_stop = process::Command::new("osascript");
-            docker_stop.args(["-e", "quit app \"Docker\""]);
-            let status = docker_stop.status().await?;
-            if !status.success() {
-                return Err(format!("{:?}", status).into());
-            }
-        } else {
-            unimplemented!();
-        }
-        while shiplift::Docker::new().info().await.is_ok() {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-    }
-    let ret = panic::AssertUnwindSafe(f()).catch_unwind().await;
-    if has_docker {
-        println!("Starting docker");
-        if cfg!(windows) {
-            let mut docker_stop = process::Command::new("powershell");
-            docker_stop.args(["-command", "Start-Service docker"]); // TODO: wait till it's listening before returning
-            let status = docker_stop.status().await?;
-            if !status.success() {
-                return Err::<O, _>(format!("{:?}", status).into());
-            }
-        } else if cfg!(target_os = "linux") {
-            let mut docker_stop = process::Command::new("sudo");
-            docker_stop.args(["systemctl", "start", "docker"]);
-            let status = docker_stop.status().await?;
-            if !status.success() {
-                return Err::<O, _>(format!("{:?}", status).into());
-            }
-        } else if cfg!(target_os = "macos") {
-            let mut docker_stop = process::Command::new("open");
-            docker_stop.args(["-a", "Docker"]);
-            let status = docker_stop.status().await?;
-            if !status.success() {
-                return Err(format!("{:?}", status).into());
-            }
-        } else {
-            unimplemented!();
-        }
-        while shiplift::Docker::new().info().await.is_err() {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-    }
-    match ret {
-        Ok(ret) => Ok(ret),
-        Err(e) => panic::resume_unwind(e),
-    }
+async fn get_blob_id(
+    s3_client: &S3Client,
+    bucket: &str,
+    key: &str,
+) -> Result<String, Box<dyn Error>> {
+    let key = format!("keys/{}.txt", key);
+    let mut id_file = aws::download(s3_client, bucket.to_string(), key).await?;
+    let mut id = String::new();
+    let _ = id_file.read_to_string(&mut id).await?;
+    Ok(id)
 }
 
-fn walk(
-    slug: PathBuf,
-    base: PathBuf,
-    cutoff: Option<SystemTime>,
-) -> impl Iterator<Item = (PathBuf, PathBuf, Option<PathBuf>)> {
-    WalkDir::new(&base)
-        .sort_by(|a, b| a.file_name().cmp(b.file_name()))
-        .into_iter()
-        .filter_map(move |entry| {
-            let entry = entry.unwrap();
-            let t = entry.file_type();
-            let path = entry.path().strip_prefix(&base).unwrap().to_owned();
-            let non_empty = path.components().next().is_some();
-            let path = non_empty.then(|| path);
-            if (t.is_file() || t.is_symlink() || t.is_dir())
-                && cutoff
-                    .map(|cutoff| cutoff < entry.metadata().unwrap().modified().unwrap())
-                    .unwrap_or(true)
-            {
-                Some((slug.clone(), base.clone(), path))
-            } else {
-                None
-            }
-        })
-}
-
-fn tar(paths: impl Iterator<Item = (PathBuf, PathBuf, Option<PathBuf>)>) -> impl AsyncRead {
-    let (writer, reader) = async_pipe::pipe();
-    let task = async move {
-        // create a .tar.zsd
-        // FIXME: switch to a threaded implementation using std::io::Write, rather than async-compression,
-        // and set the encoder to be multithreaded:
-        // https://docs.rs/zstd/0.9.0+zstd.1.5.0/zstd/stream/write/struct.Encoder.html#method.multithread
-        // This may allow us to get the compression speeds promised by these benchmarks:
-        // https://community.centminmod.com/threads/round-4-compression-comparison-benchmarks-zstd-vs-brotli-vs-pigz-vs-bzip2-vs-xz-etc.18669/
-        let tar_ = ZstdEncoder::with_quality(writer, Level::Fastest);
-        let mut tar_ = tokio_tar::Builder::new(tar_);
-        tar_.mode(tokio_tar::HeaderMode::Complete);
-        tar_.follow_symlinks(false);
-
-        // add resources to tar
-        for (mut slug, mut base, relative) in paths {
-            if let Some(relative) = relative {
-                base = base.join(&relative);
-                slug = slug.join(&relative);
-            }
-            tar_.append_path_with_name(base.clone(), slug)
-                .await
-                .unwrap_or_else(|e| panic!("can't tar {}: {:?}", base.display(), e));
-        }
-
-        // flush writers
-        let mut tar_ = tar_.into_inner().await.unwrap();
-        tar_.shutdown().await.unwrap();
-        let _tar = tar_.into_inner();
-    };
-
-    AlsoPollFuture {
-        reader,
-        task: task.fuse(),
-    }
-}
-
-async fn untar(slugs: BTreeMap<PathBuf, PathBuf>, tar: impl AsyncBufRead) -> Result<(), io::Error> {
-    tokio::pin!(tar);
-    let tar = ZstdDecoder::new(tar);
-    let tar = tokio::io::BufReader::with_capacity(16 * 1024 * 1024, tar);
-
-    let mut entries = tokio_tar::Archive::new(tar).entries().unwrap();
-
-    let mut mtimes = BTreeMap::new();
-
-    while let Some(entry) = entries.next().await {
-        let mut entry = entry.unwrap();
-        let path = entry.path().unwrap().into_owned();
-
-        let path = apply_transform(path, &slugs);
-
-        let parent = path.parent().unwrap();
-        let _ = fs::create_dir_all(&parent);
-        // https://github.com/rust-lang/rust/blob/e100ec5bc7cd768ec17d75448b29c9ab4a39272b/src/bootstrap/clean.rs#L98-L114
-        if let Ok(metadata) = fs::symlink_metadata(&path) {
-            let mut perms = metadata.permissions();
-            perms.set_readonly(false);
-            let _ = fs::set_permissions(&path, perms);
-        }
-        let _ = fs::remove_file(&path);
-        match entry.header().entry_type() {
-            EntryType::Directory => {
-                let _ = mtimes.insert(path.clone(), entry.header().mtime().unwrap());
-            }
-            _ => {
-                let _ = fs::remove_dir_all(&path);
-            }
-        }
-        entry.unpack(&path).await.map(drop).unwrap_or_else(|err| {
-            panic!(
-                "Could not unpack {:?}: {:?}\nmetadata: {:?}\nparent_metadata: {:?}",
-                path,
-                err,
-                path.symlink_metadata(),
-                parent.symlink_metadata()
-            )
-        });
-    }
-
-    for (path, mtime) in mtimes.into_iter().rev() {
-        filetime::set_file_mtime(
-            path,
-            filetime::FileTime::from_unix_time(mtime.try_into().unwrap(), 0),
-        )
-        .unwrap();
-    }
-
-    Ok(())
-}
-
-fn apply_transform(path: PathBuf, slugs: &BTreeMap<PathBuf, PathBuf>) -> PathBuf {
-    // Iterate in reverse order. This should visit more specific slugs first.
-    for (slug, base) in slugs.iter().rev() {
-        if let Ok(path) = path.strip_prefix(slug) {
-            let mut base = base.clone();
-            let non_empty = path.components().next().is_some();
-            if non_empty {
-                base = base.join(path);
-            }
-            return base;
-        }
-    }
-    panic!("{:?} does not match anything in {:?}", path, slugs);
-}
-
-#[pin_project]
-struct AlsoPollFuture<R, F> {
-    #[pin]
-    reader: R,
-    #[pin]
-    task: Fuse<F>,
-}
-impl<R, F> AsyncRead for AlsoPollFuture<R, F>
-where
-    R: AsyncRead,
-    F: Future<Output = ()>,
-{
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        let self_ = self.project();
-        let _ = self_.task.poll(cx);
-        self_.reader.poll_read(cx, buf)
-    }
-}
-impl<R, F> AsyncBufRead for AlsoPollFuture<R, F>
-where
-    R: AsyncBufRead,
-    F: Future<Output = ()>,
-{
-    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
-        let self_ = self.project();
-        let _ = self_.task.poll(cx);
-        self_.reader.poll_fill_buf(cx)
-    }
-    fn consume(self: Pin<&mut Self>, amt: usize) {
-        self.project().reader.consume(amt)
-    }
+async fn has_cache_key(s3_client: &S3Client, bucket: &str, key: &str) -> bool {
+    get_blob_id(s3_client, bucket, key).await.is_ok()
 }
 
 #[cfg(test)]
