@@ -259,7 +259,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
             Cmd_::Load(CmdLoad { keys }) => {
                 println!("fetching cache from: {:?}", keys);
                 for key in keys {
-                    let key = format!("keys/{}.txt", key);
                     if let Ok(id) =
                         get_cache_key(s3_client, config.bucket.clone(), key.clone()).await
                     {
@@ -326,6 +325,7 @@ async fn get_cache_key(
     bucket: String,
     key: String,
 ) -> Result<String, Box<dyn Error>> {
+    let key = format!("keys/{}.txt", key);
     let mut id_file = aws::download(s3_client, bucket, key).await?;
     let mut id = String::new();
     let _ = id_file.read_to_string(&mut id).await?;
