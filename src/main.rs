@@ -1,4 +1,5 @@
 mod aws;
+mod docker;
 
 use argh::FromArgs;
 use async_compression::{
@@ -20,17 +21,14 @@ use std::{
     error::Error,
     fs::{self, read_to_string},
     future::Future,
-    io, iter, panic,
+    io, iter,
     path::PathBuf,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
-    time::{Duration, SystemTime},
+    time::SystemTime,
 };
-use tokio::{
-    io::{AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf},
-    process,
-};
+use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf};
 use tokio_tar::EntryType;
 use walkdir::WalkDir;
 
@@ -135,7 +133,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .filter(|bin| bin.file_stem().unwrap() != "kache")
         .collect::<BTreeSet<_>>();
 
-    stop_docker(|| async move {
+    docker::stop_docker(|| async move {
         match cmd.cmd {
             Cmd_::Save(CmdSave { keys }) => {
                 println!("saving cache to: {:?}", keys);
@@ -287,78 +285,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Ok(())
     })
     .await?
-}
-
-async fn stop_docker<F, O>(f: impl FnOnce() -> F) -> Result<O, Box<dyn Error>>
-where
-    F: Future<Output = O>,
-{
-    let has_docker = shiplift::Docker::new().info().await.is_ok();
-    if has_docker {
-        println!("Stopping docker");
-        if cfg!(windows) {
-            let mut docker_stop = process::Command::new("powershell");
-            docker_stop.args(["-command", "Stop-Service docker"]);
-            let status = docker_stop.status().await?;
-            if !status.success() {
-                return Err(format!("{:?}", status).into());
-            }
-        } else if cfg!(target_os = "linux") {
-            let mut docker_stop = process::Command::new("sudo");
-            docker_stop.args(["systemctl", "stop", "docker"]);
-            let status = docker_stop.status().await?;
-            if !status.success() {
-                return Err(format!("{:?}", status).into());
-            }
-        } else if cfg!(target_os = "macos") {
-            let mut docker_stop = process::Command::new("osascript");
-            docker_stop.args(["-e", "quit app \"Docker\""]);
-            let status = docker_stop.status().await?;
-            if !status.success() {
-                return Err(format!("{:?}", status).into());
-            }
-        } else {
-            unimplemented!();
-        }
-        while shiplift::Docker::new().info().await.is_ok() {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-    }
-    let ret = panic::AssertUnwindSafe(f()).catch_unwind().await;
-    if has_docker {
-        println!("Starting docker");
-        if cfg!(windows) {
-            let mut docker_stop = process::Command::new("powershell");
-            docker_stop.args(["-command", "Start-Service docker"]); // TODO: wait till it's listening before returning
-            let status = docker_stop.status().await?;
-            if !status.success() {
-                return Err::<O, _>(format!("{:?}", status).into());
-            }
-        } else if cfg!(target_os = "linux") {
-            let mut docker_stop = process::Command::new("sudo");
-            docker_stop.args(["systemctl", "start", "docker"]);
-            let status = docker_stop.status().await?;
-            if !status.success() {
-                return Err::<O, _>(format!("{:?}", status).into());
-            }
-        } else if cfg!(target_os = "macos") {
-            let mut docker_stop = process::Command::new("open");
-            docker_stop.args(["-a", "Docker"]);
-            let status = docker_stop.status().await?;
-            if !status.success() {
-                return Err(format!("{:?}", status).into());
-            }
-        } else {
-            unimplemented!();
-        }
-        while shiplift::Docker::new().info().await.is_err() {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-    }
-    match ret {
-        Ok(ret) => Ok(ret),
-        Err(e) => panic::resume_unwind(e),
-    }
 }
 
 fn walk(
