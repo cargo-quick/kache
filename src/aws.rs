@@ -30,7 +30,7 @@ pub async fn upload(
     let parallelism = 10;
 
     let upload_id = &rusoto_retry(|| async {
-        let ret = s3_client
+        s3_client
             .create_multipart_upload(CreateMultipartUploadRequest {
                 bucket: bucket.clone(),
                 key: key.clone(),
@@ -40,12 +40,10 @@ pub async fn upload(
                         .unwrap_or_else(|| String::from("no-store, must-revalidate")),
                 ),
                 content_type: Some(content_type.clone()),
-                storage_class: Some(storage_class.to_string()),
+                storage_class: Some(storage_class.clone()),
                 ..Default::default()
             })
-            .await;
-        println!("create_multipart_upload: {:?}", ret);
-        ret
+            .await
     })
     .await?
     .upload_id
