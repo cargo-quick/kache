@@ -30,12 +30,12 @@ const WEB_SAFE: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123
 struct AwsConfig {
     access_key_id: String,
     secret_access_key: String,
-    #[serde(default, deserialize_with = "deserialize")]
+    #[serde(default, deserialize_with = "deserialize_region")]
     region: Option<Region>,
     endpoint: String,
 }
 
-fn deserialize<'de, D>(deserializer: D) -> Result<Option<Region>, D::Error>
+fn deserialize_region<'de, D>(deserializer: D) -> Result<Option<Region>, D::Error>
 where
     D: serde::de::Deserializer<'de>,
 {
