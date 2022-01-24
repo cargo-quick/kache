@@ -1,13 +1,13 @@
 [package]
+name = "kache"
+version = "0.2.1"
 authors = ["Tably Team"]
 description = """
 Store and retrieve the Rust build cache.
 """
 edition = "2021"
 license = "MIT OR Apache-2.0"
-name = "kache"
 publish = true
-version = "0.2.0"
 
 [dependencies]
 argh = "0.1"
@@ -20,7 +20,7 @@ envy = "0.4"
 filetime = "0.2"
 futures = "0.3"
 home = "0.5"
-indicatif = { version = "0.17.0-beta.1", features = ["tokio"], git = "https://github.com/mitsuhiko/indicatif" }
+indicatif = { version = "0.17.0-rc.1", features = ["tokio"] }
 pin-project = "1"
 rand = "0.8"
 rusoto_core = { version = "0.47", default-features = false, features = ["rustls"] }
@@ -35,9 +35,7 @@ tokio-util = { version = "0.6", features = ["io"] }
 walkdir = "2"
 
 [target.'cfg(unix)'.dependencies]
-shiplift = { version = "0.7", default-features = false, features = [
-    "unix-socket",
-], git = "https://github.com/alecmocatta/shiplift" }
+shiplift = { version = "0.7", default-features = false, features = ["unix-socket"], git = "https://github.com/alecmocatta/shiplift" }
 
 [target.'cfg(windows)'.dependencies]
 shiplift = { version = "0.7", default-features = false, git = "https://github.com/alecmocatta/shiplift" }
