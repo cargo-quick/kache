@@ -1,13 +1,13 @@
 [package]
-name = "kache"
-version = "0.2.0"
 authors = ["Tably Team"]
 description = """
 Store and retrieve the Rust build cache.
 """
 edition = "2021"
 license = "MIT OR Apache-2.0"
+name = "kache"
 publish = true
+version = "0.2.0"
 
 [dependencies]
 argh = "0.1"
@@ -30,12 +30,14 @@ serde = "1"
 serde_json = "1"
 serde_with = "1"
 tokio = { version = "1", features = ["macros", "net", "fs", "process", "rt-multi-thread", "io-util"] }
-tokio-tar = { version = "0.3", git = "https://github.com/vorot93/tokio-tar" }
+tokio-tar = { version = "0.3", git = "https://github.com/Ben-PH/tokio-tar", branch = "yield_point_fix" }
 tokio-util = { version = "0.6", features = ["io"] }
 walkdir = "2"
 
 [target.'cfg(unix)'.dependencies]
-shiplift = { version = "0.7", default-features = false, features = ["unix-socket"], git = "https://github.com/alecmocatta/shiplift" }
+shiplift = { version = "0.7", default-features = false, features = [
+    "unix-socket",
+], git = "https://github.com/alecmocatta/shiplift" }
 
 [target.'cfg(windows)'.dependencies]
 shiplift = { version = "0.7", default-features = false, git = "https://github.com/alecmocatta/shiplift" }

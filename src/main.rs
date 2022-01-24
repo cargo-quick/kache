@@ -7,7 +7,8 @@ use futures::{future::try_join_all, stream, StreamExt};
 use rusoto_core::{HttpClient, Region};
 use rusoto_credential::StaticProvider;
 use rusoto_s3::S3Client;
-use serde::Deserialize;
+use serde::{de, Deserialize};
+use serde_with::DeserializeAs;
 use std::{
     collections::{BTreeSet, HashMap},
     env,
@@ -15,6 +16,7 @@ use std::{
     fs::{self, read_to_string},
     iter,
     path::PathBuf,
+    str::FromStr,
     sync::Arc,
 };
 use tokio::io::AsyncReadExt;
@@ -28,8 +30,21 @@ const WEB_SAFE: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123
 struct AwsConfig {
     access_key_id: String,
     secret_access_key: String,
-    #[serde(with = "serde_with::rust::display_fromstr")]
-    region: Region,
+    #[serde(default, deserialize_with = "deserialize_region")]
+    region: Option<Region>,
+    endpoint: String,
+}
+
+fn deserialize_region<'de, D>(deserializer: D) -> Result<Option<Region>, D::Error>
+where
+    D: serde::de::Deserializer<'de>,
+{
+    serde_with::NoneAsEmptyString::deserialize_as(deserializer).and_then(|str: Option<String>| {
+        Ok(match str {
+            Some(str) => Some(Region::from_str(&str).map_err(de::Error::custom)?),
+            None => None,
+        })
+    })
 }
 
 #[derive(Deserialize, Debug)]
@@ -119,11 +134,23 @@ async fn run() -> Result<(), Box<dyn Error>> {
             None,
             None,
         );
-        S3Client::new_with(http_client, creds, aws_config.region)
+
+        // Check if a custom endpoint has been provided?
+        let region = if !aws_config.endpoint.is_empty() {
+            Region::Custom {
+                name: "custom-region".to_string(),
+                endpoint: aws_config.endpoint,
+            }
+        } else {
+            aws_config.region.unwrap()
+        };
+
+        S3Client::new_with(http_client, creds, region)
     };
 
     let cwd = PathBuf::from(".");
     let cargo_home = home::cargo_home().unwrap();
+
     let mut docker_dir = shiplift::Docker::new()
         .info()
         .await
@@ -136,6 +163,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 .join("Library/Containers/com.docker.docker/Data/vms"),
         );
     }
+
     let crates: Crates =
         serde_json::from_slice(&fs::read(cargo_home.join(".crates2.json")).unwrap()).unwrap();
     let cargo_bins = crates
@@ -189,6 +217,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     (_, true) => (keys, id, None),
                 };
                 println!("packing {}", id);
+
                 let tar = tar(iter::empty()
                     .chain(walk(
                         PathBuf::from("cargo").join(".crates.toml"),
@@ -241,6 +270,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     tar,
                 )
                 .await?;
+
                 let id = &id;
                 let _: Vec<()> = try_join_all(keys.into_iter().map(|key| async move {
                     let key = format!("keys/{}.txt", key);
@@ -255,10 +285,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     .await
                 }))
                 .await?;
+
                 println!("finished saving cache");
             }
             Cmd_::Load(CmdLoad { keys }) => {
                 println!("fetching cache from: {:?}", keys);
+
                 for key in keys {
                     if let Ok(id) = get_blob_id(s3_client, &config.bucket, &key).await {
                         // Assumption: if this id is listed in s3 under this cache key then the underlying blobs *must* still exist.
@@ -311,6 +343,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         return Ok(());
                     }
                 }
+
                 println!("cache miss :(");
             }
         }

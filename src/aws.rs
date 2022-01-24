@@ -39,6 +39,7 @@ pub async fn upload(
                         .unwrap_or_else(|| String::from("no-store, must-revalidate")),
                 ),
                 content_type: Some(content_type.clone()),
+                storage_class: Some("REDUCED_REDUNDANCY".to_string()),
                 ..Default::default()
             })
             .await
