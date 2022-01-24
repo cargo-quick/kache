@@ -30,6 +30,7 @@ struct AwsConfig {
     secret_access_key: String,
     #[serde(with = "serde_with::rust::display_fromstr")]
     region: Region,
+    endpoint: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -119,7 +120,18 @@ async fn run() -> Result<(), Box<dyn Error>> {
             None,
             None,
         );
-        S3Client::new_with(http_client, creds, aws_config.region)
+
+        // Check if a custom endpoint has been provided?
+        let region = if !aws_config.endpoint.is_empty() {
+            Region::Custom {
+                name: aws_config.region.name(),
+                endpoint: aws_config.endpoint,
+            }
+        } else {
+            aws_config.region
+        };
+
+        S3Client::new_with(http_client, creds, region)
     };
 
     let cwd = PathBuf::from(".");
