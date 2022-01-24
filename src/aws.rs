@@ -15,6 +15,7 @@ pub async fn upload(
     content_type: String,
     cache_control: Option<u64>,
     read: impl AsyncRead,
+    storage_class: String,
 ) -> Result<(), Box<dyn Error>> {
     let pb = &indicatif::ProgressBar::new(0);
     pb.set_style(
@@ -29,7 +30,7 @@ pub async fn upload(
     let parallelism = 10;
 
     let upload_id = &rusoto_retry(|| async {
-        s3_client
+        let ret = s3_client
             .create_multipart_upload(CreateMultipartUploadRequest {
                 bucket: bucket.clone(),
                 key: key.clone(),
@@ -39,10 +40,12 @@ pub async fn upload(
                         .unwrap_or_else(|| String::from("no-store, must-revalidate")),
                 ),
                 content_type: Some(content_type.clone()),
-                storage_class: Some("REDUCED_REDUNDANCY".to_string()),
+                storage_class: Some(storage_class.to_string()),
                 ..Default::default()
             })
-            .await
+            .await;
+        println!("create_multipart_upload: {:?}", ret);
+        ret
     })
     .await?
     .upload_id

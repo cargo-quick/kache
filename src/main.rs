@@ -124,7 +124,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let cmd: Cmd = argh::from_env();
 
     let config = &envy::prefixed("KACHE_").from_env::<Config>().unwrap();
-    let s3_client = &{
+    let (s3_client, storage_class) = &{
         let aws_config: AwsConfig = envy::prefixed("AWS_").from_env().unwrap();
 
         let http_client = Arc::new(HttpClient::new().expect("failed to create request dispatcher"));
@@ -136,16 +136,22 @@ async fn run() -> Result<(), Box<dyn Error>> {
         );
 
         // Check if a custom endpoint has been provided?
-        let region = if !aws_config.endpoint.is_empty() {
-            Region::Custom {
-                name: "custom-region".to_string(),
-                endpoint: aws_config.endpoint,
-            }
+        let (region, storage_class) = if !aws_config.endpoint.is_empty() {
+            (
+                Region::Custom {
+                    name: "custom-region".to_string(),
+                    endpoint: aws_config.endpoint,
+                },
+                "STANDARD",
+            )
         } else {
-            aws_config.region.unwrap()
+            (aws_config.region.unwrap(), "REDUCED_REDUNDANCY")
         };
 
-        S3Client::new_with(http_client, creds, region)
+        (
+            S3Client::new_with(http_client, creds, region),
+            storage_class,
+        )
     };
 
     let cwd = PathBuf::from(".");
@@ -184,6 +190,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     count_nonempty(&[&overwrite, &layered, &keys]) == 1,
                     "mixing --overwrite, --layered and normal keys is not supported yet",
                 );
+
                 let mut keys: Vec<String> = stream::iter(keys)
                     .filter(|k| {
                         let k = k.clone();
@@ -261,6 +268,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                             .into_iter()
                             .flatten(),
                     ));
+
                 aws::upload(
                     s3_client,
                     config.bucket.clone(),
@@ -268,6 +276,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     String::from("application/zstd"),
                     Some(31536000),
                     tar,
+                    storage_class.to_string(),
                 )
                 .await?;
 
@@ -281,6 +290,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         String::from("text/plain"),
                         Some(600),
                         id.as_bytes(),
+                        storage_class.to_string(),
                     )
                     .await
                 }))
