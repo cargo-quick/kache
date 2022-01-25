@@ -32,7 +32,8 @@ struct AwsConfig {
     secret_access_key: String,
     #[serde(default, deserialize_with = "deserialize_region")]
     region: Option<Region>,
-    endpoint: String,
+    #[serde(default, with = "serde_with::rust::string_empty_as_none")]
+    endpoint: Option<String>,
 }
 
 fn deserialize_region<'de, D>(deserializer: D) -> Result<Option<Region>, D::Error>
@@ -136,13 +137,17 @@ async fn run() -> Result<(), Box<dyn Error>> {
         );
 
         // Check if a custom endpoint has been provided?
-        let region = if !aws_config.endpoint.is_empty() {
+        let region = if let Some(endpoint) = aws_config.endpoint {
             Region::Custom {
-                name: "custom-region".to_string(),
-                endpoint: aws_config.endpoint,
+                name: aws_config
+                    .region
+                    .as_ref()
+                    .map_or("custom-region", |region| region.name())
+                    .to_owned(),
+                endpoint,
             }
         } else {
-            aws_config.region.unwrap()
+            aws_config.region.expect("need AWS_REGION or AWS_ENDPOINT")
         };
 
         S3Client::new_with(http_client, creds, region)
