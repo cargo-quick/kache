@@ -20,7 +20,9 @@ curl \
     --silent \
     --show-error \
     --fail \
-    "https://github.com/cargo-quick/kache/releases/download/v0.1.5/kache-v0.1.5-${TARGET_ARCH}.tar.gz" \
+    --retry 10 \
+    --retry-connrefused \
+    "https://github.com/cargo-quick/kache/releases/download/v0.2.2/kache-v0.2.2-${TARGET_ARCH}.tar.gz" \
     | tar -xzvvf - -C "$CARGO_BIN_DIR"
 ```
 

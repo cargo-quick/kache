@@ -1,6 +1,6 @@
 [package]
 name = "kache"
-version = "0.2.1"
+version = "0.2.2"
 authors = ["Tably Team"]
 description = """
 Store and retrieve the Rust build cache.
