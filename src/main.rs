@@ -184,6 +184,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     count_nonempty(&[&overwrite, &layered, &keys]) == 1,
                     "mixing --overwrite, --layered and normal keys is not supported yet",
                 );
+
                 let mut keys: Vec<String> = stream::iter(keys)
                     .filter(|k| {
                         let k = k.clone();
@@ -261,6 +262,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                             .into_iter()
                             .flatten(),
                     ));
+
                 aws::upload(
                     s3_client,
                     config.bucket.clone(),
