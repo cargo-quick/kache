@@ -124,7 +124,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let cmd: Cmd = argh::from_env();
 
     let config = &envy::prefixed("KACHE_").from_env::<Config>().unwrap();
-    let (s3_client, storage_class) = &{
+    let s3_client = &{
         let aws_config: AwsConfig = envy::prefixed("AWS_").from_env().unwrap();
 
         let http_client = Arc::new(HttpClient::new().expect("failed to create request dispatcher"));
@@ -136,22 +136,16 @@ async fn run() -> Result<(), Box<dyn Error>> {
         );
 
         // Check if a custom endpoint has been provided?
-        let (region, storage_class) = if !aws_config.endpoint.is_empty() {
-            (
-                Region::Custom {
-                    name: "custom-region".to_string(),
-                    endpoint: aws_config.endpoint,
-                },
-                "STANDARD",
-            )
+        let region = if !aws_config.endpoint.is_empty() {
+            Region::Custom {
+                name: "custom-region".to_string(),
+                endpoint: aws_config.endpoint,
+            }
         } else {
-            (aws_config.region.unwrap(), "REDUCED_REDUNDANCY")
+            aws_config.region.unwrap()
         };
 
-        (
-            S3Client::new_with(http_client, creds, region),
-            storage_class,
-        )
+        S3Client::new_with(http_client, creds, region)
     };
 
     let cwd = PathBuf::from(".");
@@ -276,7 +270,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     String::from("application/zstd"),
                     Some(31536000),
                     tar,
-                    storage_class.to_string(),
                 )
                 .await?;
 
@@ -290,7 +283,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         String::from("text/plain"),
                         Some(600),
                         id.as_bytes(),
-                        storage_class.to_string(),
                     )
                     .await
                 }))

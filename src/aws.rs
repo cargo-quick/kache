@@ -15,7 +15,6 @@ pub async fn upload(
     content_type: String,
     cache_control: Option<u64>,
     read: impl AsyncRead,
-    storage_class: String,
 ) -> Result<(), Box<dyn Error>> {
     let pb = &indicatif::ProgressBar::new(0);
     pb.set_style(
@@ -40,7 +39,6 @@ pub async fn upload(
                         .unwrap_or_else(|| String::from("no-store, must-revalidate")),
                 ),
                 content_type: Some(content_type.clone()),
-                storage_class: Some(storage_class.clone()),
                 ..Default::default()
             })
             .await
@@ -284,7 +282,8 @@ where
                 println!("Got transient error: {:?}. Retrying.", e)
             }
             Err(RusotoError::Unknown(response))
-                if response.status.is_server_error()
+				// backblaze gives us 501 when you give it options it doesn't support
+				if matches!(response.status.as_u16(), 500 | 502 | 503 | 504)
                     || (response.status == 403
                         && str::from_utf8(&response.body)
                             .unwrap()
