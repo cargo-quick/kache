@@ -220,44 +220,68 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 println!("packing {}", id);
 
                 let tar = tar(iter::empty()
-                    .chain(walk(
-                        PathBuf::from("cargo").join(".crates.toml"),
-                        cargo_home.join(".crates.toml"),
-                        cutoff,
-                    ))
-                    .chain(walk(
-                        PathBuf::from("cargo").join(".crates2.json"),
-                        cargo_home.join(".crates2.json"),
-                        cutoff,
-                    ))
+                    .chain(
+                        walk(
+                            PathBuf::from("cargo").join(".crates.toml"),
+                            cargo_home.join(".crates.toml"),
+                            cutoff,
+                        )
+                        .into_iter()
+                        .flatten(),
+                    )
+                    .chain(
+                        walk(
+                            PathBuf::from("cargo").join(".crates2.json"),
+                            cargo_home.join(".crates2.json"),
+                            cutoff,
+                        )
+                        .into_iter()
+                        .flatten(),
+                    )
                     .chain(cargo_bins.into_iter().flat_map(|bin| {
                         walk(
                             PathBuf::from("cargo").join("bin").join(&bin),
                             cargo_home.join("bin").join(bin),
                             cutoff,
                         )
+                        .into_iter()
+                        .flatten()
                     }))
-                    .chain(walk(
-                        PathBuf::from("cargo").join("registry/index"),
-                        cargo_home.join("registry/index"),
-                        cutoff,
-                    ))
-                    .chain(walk(
-                        PathBuf::from("cargo").join("registry/cache"),
-                        cargo_home.join("registry/cache"),
-                        cutoff,
-                    ))
-                    .chain(walk(
-                        PathBuf::from("cargo").join("git/db"),
-                        cargo_home.join("git/db"),
-                        cutoff,
-                    ))
-                    .chain(walk(PathBuf::from("cwd"), cwd, cutoff))
+                    .chain(
+                        walk(
+                            PathBuf::from("cargo").join("registry/index"),
+                            cargo_home.join("registry/index"),
+                            cutoff,
+                        )
+                        .into_iter()
+                        .flatten(),
+                    )
+                    .chain(
+                        walk(
+                            PathBuf::from("cargo").join("registry/cache"),
+                            cargo_home.join("registry/cache"),
+                            cutoff,
+                        )
+                        .into_iter()
+                        .flatten(),
+                    )
+                    .chain(
+                        walk(
+                            PathBuf::from("cargo").join("git/db"),
+                            cargo_home.join("git/db"),
+                            cutoff,
+                        )
+                        .into_iter()
+                        .flatten(),
+                    )
+                    .chain(walk(PathBuf::from("cwd"), cwd, cutoff).unwrap())
                     .chain(
                         docker_dir
                             .as_ref()
                             .map(|docker_dir| {
                                 walk(PathBuf::from("docker"), docker_dir.clone(), cutoff)
+                                    .into_iter()
+                                    .flatten()
                             })
                             .into_iter()
                             .flatten(),
@@ -295,7 +319,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
                 for key in keys {
                     if let Ok(id) = get_blob_id(s3_client, &config.bucket, &key).await {
-                        // Assumption: if this id is listed in s3 under this cache key then the underlying blobs *must* still exist.
+                        // Assumption: if this id is listed in s3 under this cache key then the
+                        // underlying blobs *must* still exist.
                         println!("cache hit: {} -> {}", key, id);
                         let ids = id
                             .match_indices(':')
@@ -380,11 +405,9 @@ mod tests {
         let target_dir = PathBuf::from(env::var("TARGET_DIR").unwrap());
         let cargo_home = PathBuf::from(env::var("CARGO_HOME").unwrap());
 
-        let paths = walk(PathBuf::from("cargo"), cargo_home, None).chain(walk(
-            PathBuf::from("target"),
-            target_dir,
-            None,
-        ));
+        let paths = walk(PathBuf::from("cargo"), cargo_home, None)
+            .unwrap()
+            .chain(walk(PathBuf::from("target"), target_dir, None).unwrap());
         let tar = tar(paths);
         untar(
             vec![

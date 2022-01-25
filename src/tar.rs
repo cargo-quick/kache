@@ -28,38 +28,49 @@ pub fn walk(
     slug: PathBuf,
     base: PathBuf,
     cutoff: Option<SystemTime>,
-) -> impl Iterator<Item = FilePathInfo> {
-    WalkDir::new(&base)
+) -> Result<impl Iterator<Item = FilePathInfo>, io::Error> {
+    let mut walk = WalkDir::new(&base)
         .sort_by(|a, b| a.file_name().cmp(b.file_name()))
         .into_iter()
-        .filter_map(move |entry| {
-            let entry = entry.unwrap();
-            let t = entry.file_type();
-            let path = entry.path().strip_prefix(&base).unwrap().to_owned();
-            let non_empty = path.components().next().is_some();
-            let path = non_empty.then(|| path);
-            if (t.is_file() || t.is_symlink() || t.is_dir())
-                && cutoff
-                    .map(|cutoff| cutoff < entry.metadata().unwrap().modified().unwrap())
-                    .unwrap_or(true)
-            {
-                Some(FilePathInfo {
-                    slug: slug.clone(),
-                    base: base.clone(),
-                    relative: path,
-                })
-            } else {
-                None
-            }
-        })
+        .peekable();
+    let entry = walk.peek().unwrap();
+    if let Err(e) = entry {
+        if e.io_error()
+            .map_or(false, |e| e.kind() == io::ErrorKind::NotFound)
+        {
+            let e = walk.next().unwrap().err().unwrap();
+            return Err(e.into_io_error().unwrap());
+        }
+    }
+    Ok(walk.filter_map(move |entry| {
+        let entry = entry.unwrap();
+        let t = entry.file_type();
+        let path = entry.path().strip_prefix(&base).unwrap().to_owned();
+        let non_empty = path.components().next().is_some();
+        let path = non_empty.then(|| path);
+
+        if (t.is_file() || t.is_symlink() || t.is_dir())
+            && cutoff
+                .map(|cutoff| cutoff < entry.metadata().unwrap().modified().unwrap())
+                .unwrap_or(true)
+        {
+            Some(FilePathInfo {
+                slug: slug.clone(),
+                base: base.clone(),
+                relative: path,
+            })
+        } else {
+            None
+        }
+    }))
 }
 
 pub fn tar(paths: impl Iterator<Item = FilePathInfo>) -> impl AsyncRead {
     let (writer, reader) = async_pipe::pipe();
     let task = async move {
         // create a .tar.zsd
-        // FIXME: switch to a threaded implementation using std::io::Write, rather than async-compression,
-        // and set the encoder to be multithreaded:
+        // FIXME: switch to a threaded implementation using std::io::Write, rather than
+        // async-compression, and set the encoder to be multithreaded:
         // https://docs.rs/zstd/0.9.0+zstd.1.5.0/zstd/stream/write/struct.Encoder.html#method.multithread
         // This may allow us to get the compression speeds promised by these benchmarks:
         // https://community.centminmod.com/threads/round-4-compression-comparison-benchmarks-zstd-vs-brotli-vs-pigz-vs-bzip2-vs-xz-etc.18669/

@@ -1,9 +1,5 @@
-use std::error::Error;
-use std::future::Future;
-use std::panic;
-use std::time::Duration;
-
 use futures::FutureExt;
+use std::{error::Error, future::Future, panic, time::Duration};
 use tokio::process;
 
 pub(crate) async fn stop_docker<F, O>(f: impl FnOnce() -> F) -> Result<O, Box<dyn Error>>
