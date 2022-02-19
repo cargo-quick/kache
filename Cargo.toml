@@ -12,7 +12,6 @@ publish = true
 [dependencies]
 argh = "0.1"
 async-compression = { version = "0.3", features = ["tokio", "zstd"] }
-async-pipe = { version = "0.1", features = ["tokio"], git = "https://github.com/alecmocatta/async-pipe-rs" }
 base-x = "0.2"
 bytes = "1"
 dotenv = "0.15.0"
@@ -20,7 +19,7 @@ envy = "0.4"
 filetime = "0.2"
 futures = "0.3"
 home = "0.5"
-indicatif = { version = "0.17.0-rc.1", features = ["tokio"] }
+indicatif = { version = "0.17.0-rc.4", features = ["tokio"] }
 pin-project = "1"
 rand = "0.8"
 rusoto_core = { version = "0.47", default-features = false, features = ["rustls"] }

@@ -66,7 +66,7 @@ pub fn walk(
 }
 
 pub fn tar(paths: impl Iterator<Item = FilePathInfo>) -> impl AsyncRead {
-    let (writer, reader) = async_pipe::pipe();
+    let (writer, reader) = tokio::io::duplex(16 * 1024 * 1024);
     let task = async move {
         // create a .tar.zsd
         // FIXME: switch to a threaded implementation using std::io::Write, rather than
