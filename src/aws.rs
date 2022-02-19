@@ -211,6 +211,7 @@ pub async fn download(
                 // This is the part of the code that does the actual downloading.
                 async move {
                     let range = part_size * i..(part_size * (i + 1)).min(length);
+                    let cap: usize = (range.end - range.start).try_into().unwrap();
 
                     'async_read: loop {
                         let body = rusoto_retry(|| async {
@@ -230,13 +231,15 @@ pub async fn download(
                         .into_async_read();
 
                         let mut body = pb.wrap_async_read(body);
-                        let cap: usize = (range.end - range.start).try_into().unwrap();
                         let mut buf = BytesMut::with_capacity(cap);
 
                         while buf.len() != cap {
                             let _bytes = match body.read_buf(&mut buf).await {
                                 Ok(bytes) => bytes,
-                                Err(_e) => continue 'async_read,
+                                Err(e) => {
+                                    println!("Got transient http error: {:?}. Retrying.", e);
+                                    continue 'async_read;
+                                }
                             };
                             assert!(buf.len() <= cap);
                         }
@@ -281,13 +284,19 @@ where
             Err(RusotoError::HttpDispatch(e)) => {
                 println!("Got transient error: {:?}. Retrying.", e)
             }
+            // https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-retries.html
+            // https://docs.aws.amazon.com/general/latest/gr/api-retries.html
+            // https://aws.amazon.com/premiumsupport/knowledge-center/http-5xx-errors-s3/
+            // backblaze gives us 501 when you give it options it doesn't support
             Err(RusotoError::Unknown(response))
-				// backblaze gives us 501 when you give it options it doesn't support
-				if matches!(response.status.as_u16(), 500 | 502 | 503 | 504)
+                if matches!(response.status.as_u16(), 429 | 500 | 502 | 503 | 504 | 509)
                     || (response.status == 403
                         && str::from_utf8(&response.body)
                             .unwrap()
-                            .contains("RequestTimeTooSkewed")) => {}
+                            .contains("RequestTimeTooSkewed")) =>
+            {
+                println!("Got transient response error: {:?}. Retrying.", response)
+            }
             res => break res,
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
