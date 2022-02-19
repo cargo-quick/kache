@@ -22,7 +22,7 @@ curl \
     --fail \
     --retry 10 \
     --retry-connrefused \
-    "https://github.com/cargo-quick/kache/releases/download/v0.2.3/kache-v0.2.3-${TARGET_ARCH}.tar.gz" \
+    "https://github.com/cargo-quick/kache/releases/download/v0.2/kache-v0.2-${TARGET_ARCH}.tar.gz" \
     | tar -xzvvf - -C "$CARGO_BIN_DIR"
 ```
 
@@ -62,6 +62,7 @@ Periodically, you will probably want to run a build that doesn't pull from any c
 
 ```
 git tag v0.1.0 -m v0.1.0
+git tag v0.1 -m v0.1
 git push --tags
 ```
 
