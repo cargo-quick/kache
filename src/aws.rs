@@ -16,13 +16,14 @@ pub async fn upload(
     cache_control: Option<u64>,
     read: impl AsyncRead,
 ) -> Result<(), Box<dyn Error>> {
-    let pb = &indicatif::ProgressBar::new(0);
-    pb.set_style(
-		indicatif::ProgressStyle::default_bar()
-			.template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
-			.progress_chars("#>-")
-			.on_finish(indicatif::ProgressFinish::AndLeave),
-	);
+    let pb = &indicatif::ProgressBar::new(0)
+        .with_style(
+            indicatif::ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
+                .unwrap()
+                .progress_chars("#>-"),
+        )
+        .with_finish(indicatif::ProgressFinish::AndLeave);
 
     let part_size = 16 * 1024 * 1024;
     assert!((5_242_880..5_368_709_120).contains(&part_size)); // S3's min and max 5MiB and 5GiB
@@ -193,13 +194,14 @@ pub async fn download(
         part_size * (parts.unwrap_or(1) - 1) < length && length <= part_size * parts.unwrap_or(1)
     );
 
-    let pb = indicatif::ProgressBar::new(length);
-    pb.set_style(
-		indicatif::ProgressStyle::default_bar()
-			.template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
-			.progress_chars("#>-")
-			.on_finish(indicatif::ProgressFinish::AndLeave),
-	);
+    let pb = indicatif::ProgressBar::new(length)
+        .with_style(
+            indicatif::ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
+                .unwrap()
+                .progress_chars("#>-"),
+        )
+        .with_finish(indicatif::ProgressFinish::AndLeave);
 
     if let Some(parts) = parts {
         let parallelism = 20;
