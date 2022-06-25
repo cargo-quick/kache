@@ -1,3 +1,4 @@
+use std::path::Path;
 use async_compression::{
     tokio::{bufread::ZstdDecoder, write::ZstdEncoder},
     Level,
@@ -6,13 +7,12 @@ use futures::{future::Fuse, FutureExt, StreamExt};
 use pin_project::pin_project;
 use std::{
     collections::BTreeMap,
-    fs::{self},
+    fs,
     future::Future,
     io,
     path::PathBuf,
     pin::Pin,
     task::{Context, Poll},
-    time::SystemTime,
 };
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWriteExt, ReadBuf};
 use tokio_tar::EntryType;
@@ -27,7 +27,6 @@ pub struct FilePathInfo {
 pub fn walk(
     slug: PathBuf,
     base: PathBuf,
-    cutoff: Option<SystemTime>,
 ) -> Result<impl Iterator<Item = FilePathInfo>, io::Error> {
     let mut walk = WalkDir::new(&base)
         .sort_by(|a, b| a.file_name().cmp(b.file_name()))
@@ -49,11 +48,7 @@ pub fn walk(
         let non_empty = path.components().next().is_some();
         let path = non_empty.then(|| path);
 
-        if (t.is_file() || t.is_symlink() || t.is_dir())
-            && cutoff
-                .map(|cutoff| cutoff < entry.metadata().unwrap().modified().unwrap())
-                .unwrap_or(true)
-        {
+        if t.is_file() || t.is_symlink() || t.is_dir() {
             Some(FilePathInfo {
                 slug: slug.clone(),
                 base: base.clone(),
@@ -115,7 +110,8 @@ pub async fn untar(
     let tar = ZstdDecoder::new(tar);
     let tar = tokio::io::BufReader::with_capacity(16 * 1024 * 1024, tar);
 
-    let mut entries = tokio_tar::Archive::new(tar).entries().unwrap();
+    let mut entries = tokio_tar::Archive::new(tar);
+    let mut entries = entries.entries().unwrap();
 
     let mut mtimes = BTreeMap::new();
 
@@ -123,7 +119,7 @@ pub async fn untar(
         let mut entry = entry.unwrap();
         let path = entry.path().unwrap().into_owned();
 
-        let path = apply_transform(path, &slugs);
+        let path = apply_transform(&path, &slugs);
 
         let parent = path.parent().unwrap();
         let _ = fs::create_dir_all(&parent);
@@ -164,7 +160,7 @@ pub async fn untar(
     Ok(())
 }
 
-fn apply_transform(path: PathBuf, slugs: &BTreeMap<PathBuf, PathBuf>) -> PathBuf {
+fn apply_transform(path: &Path, slugs: &BTreeMap<PathBuf, PathBuf>) -> PathBuf {
     // Iterate in reverse order. This should visit more specific slugs first.
     for (slug, base) in slugs.iter().rev() {
         if let Ok(path) = path.strip_prefix(slug) {
@@ -212,6 +208,6 @@ where
         self_.reader.poll_fill_buf(cx)
     }
     fn consume(self: Pin<&mut Self>, amt: usize) {
-        self.project().reader.consume(amt)
+        self.project().reader.consume(amt);
     }
 }

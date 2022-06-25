@@ -4,8 +4,6 @@ mod tar;
 
 use argh::FromArgs;
 use futures::{future::try_join_all, stream, StreamExt};
-use rusoto_core::{HttpClient, Region};
-use rusoto_credential::StaticProvider;
 use rusoto_s3::S3Client;
 use serde::{de, Deserialize};
 use serde_with::DeserializeAs;
@@ -13,16 +11,16 @@ use std::{
     collections::{BTreeSet, HashMap},
     env,
     error::Error,
-    fs::{self, read_to_string},
+    fs,
     iter,
     path::PathBuf,
     str::FromStr,
-    sync::Arc,
 };
 use tokio::io::AsyncReadExt;
 
 use docker::stop_docker;
 use tar::{tar, untar, walk};
+use aws::Region;
 
 const WEB_SAFE: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_~";
 
@@ -71,23 +69,16 @@ enum Cmd_ {
 /// save cache to s3
 #[argh(subcommand, name = "save")]
 struct CmdSave {
-    /// keys to upload to.
-    /// Will upload to all non-existent keys.
-    #[argh(positional)]
-    keys: Vec<String>,
-
-    /// push a layered tarball to this key.
-    /// Will overwrite these keys with a chain of tarballs containing any added/modified
-    /// files (WARNING: this never deletes files, so this will probably break things).
-    #[argh(option)]
-    layered: Vec<String>,
-
     /// overwrite the contents of this key, even if it already exists.
     /// Note that if you repeatedly pull from a key and re-push to it then you will
     /// gradually accumulate cruft, so you will want a strategy to stop cruft from
     /// building up. Rotating your cache key every week is one approach to this problem.
+    #[argh(positional)]
+    keys: Vec<String>,
+
+    /// only write to this key if it doesn't already exist
     #[argh(option)]
-    overwrite: Vec<String>,
+    create: Vec<String>,
 }
 
 #[derive(FromArgs, Debug)]
@@ -109,49 +100,38 @@ struct Install {
     bins: Vec<PathBuf>,
 }
 
-fn count_nonempty(lists: &[&Vec<String>]) -> usize {
-    lists.iter().map(|l| (!l.is_empty()) as usize).sum()
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     run().await
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run() -> Result<(), Box<dyn Error>> {
-    env::set_var("RUST_BACKTRACE", "1");
+    if env::var("RUST_BACKTRACE").is_err() {
+        env::set_var("RUST_BACKTRACE", "1");
+    }
     dotenv::dotenv().ok();
 
     let cmd: Cmd = argh::from_env();
 
     let config = &envy::prefixed("KACHE_").from_env::<Config>().unwrap();
-    let s3_client = &{
-        let aws_config: AwsConfig = envy::prefixed("AWS_").from_env().unwrap();
+    let aws_config: AwsConfig = envy::prefixed("AWS_").from_env().unwrap();
 
-        let http_client = Arc::new(HttpClient::new().expect("failed to create request dispatcher"));
-        let creds = StaticProvider::new(
-            aws_config.access_key_id,
-            aws_config.secret_access_key,
-            None,
-            None,
-        );
-
-        // Check if a custom endpoint has been provided?
-        let region = if let Some(endpoint) = aws_config.endpoint {
-            Region::Custom {
-                name: aws_config
-                    .region
-                    .as_ref()
-                    .map_or("custom-region", |region| region.name())
-                    .to_owned(),
-                endpoint,
-            }
-        } else {
-            aws_config.region.expect("need AWS_REGION or AWS_ENDPOINT")
-        };
-
-        S3Client::new_with(http_client, creds, region)
+    // Check if a custom endpoint has been provided?
+    let region = if let Some(endpoint) = aws_config.endpoint {
+        Region::Custom {
+            name: aws_config
+                .region
+                .as_ref()
+                .map_or("custom-region", Region::name)
+                .to_owned(),
+            endpoint,
+        }
+    } else {
+        aws_config.region.expect("need AWS_REGION or AWS_ENDPOINT")
     };
+
+    let s3_client = &aws::s3_new(&aws_config.access_key_id, &aws_config.secret_access_key, region);
 
     let cwd = PathBuf::from(".");
     let cargo_home = home::cargo_home().unwrap();
@@ -181,16 +161,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
     stop_docker(|| async move {
         match cmd.cmd {
             Cmd_::Save(CmdSave {
-                overwrite,
-                layered,
-                keys,
+                mut keys,
+                mut create,
             }) => {
-                assert!(
-                    count_nonempty(&[&overwrite, &layered, &keys]) == 1,
-                    "mixing --overwrite, --layered and normal keys is not supported yet",
-                );
-
-                let mut keys: Vec<String> = stream::iter(keys)
+                create = stream::iter(create)
                     .filter(|k| {
                         let k = k.clone();
                         async move { !has_cache_key(s3_client, &config.bucket, &k).await }
@@ -198,9 +172,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     .collect()
                     .await;
 
-                keys.extend(overwrite);
+                keys.extend(create);
 
-                if layered.is_empty() && keys.is_empty() {
+                if keys.is_empty() {
                     println!("Nothing to do. All keys already exist.");
                     return Ok(());
                 }
@@ -208,20 +182,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 println!("saving cache to: {:?}", keys);
                 let id: [u8; 16] = rand::random();
                 let id = base_x::encode(WEB_SAFE, &id);
-                let info_path = PathBuf::from(".kache-info");
-                let (keys, id, cutoff) = match (info_path.symlink_metadata(), layered.is_empty()) {
-                    (Ok(info), false) => {
-                        let parent_id = read_to_string(info_path).unwrap();
-                        let parent_id = parent_id.trim_end_matches('\n');
-                        (
-                            layered,
-                            format!("{}:{}", parent_id, id),
-                            Some(info.modified().unwrap()),
-                        )
-                    }
-                    (Err(_), false) => (layered, id, None),
-                    (_, true) => (keys, id, None),
-                };
                 println!("packing {}", id);
 
                 let tar = tar(iter::empty()
@@ -229,7 +189,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         walk(
                             PathBuf::from("cargo").join(".crates.toml"),
                             cargo_home.join(".crates.toml"),
-                            cutoff,
                         )
                         .into_iter()
                         .flatten(),
@@ -238,7 +197,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         walk(
                             PathBuf::from("cargo").join(".crates2.json"),
                             cargo_home.join(".crates2.json"),
-                            cutoff,
                         )
                         .into_iter()
                         .flatten(),
@@ -247,7 +205,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         walk(
                             PathBuf::from("cargo").join("bin").join(&bin),
                             cargo_home.join("bin").join(bin),
-                            cutoff,
                         )
                         .into_iter()
                         .flatten()
@@ -256,7 +213,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         walk(
                             PathBuf::from("cargo").join("registry/index"),
                             cargo_home.join("registry/index"),
-                            cutoff,
                         )
                         .into_iter()
                         .flatten(),
@@ -265,7 +221,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         walk(
                             PathBuf::from("cargo").join("registry/cache"),
                             cargo_home.join("registry/cache"),
-                            cutoff,
                         )
                         .into_iter()
                         .flatten(),
@@ -274,17 +229,16 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         walk(
                             PathBuf::from("cargo").join("git/db"),
                             cargo_home.join("git/db"),
-                            cutoff,
                         )
                         .into_iter()
                         .flatten(),
                     )
-                    .chain(walk(PathBuf::from("cwd"), cwd, cutoff).unwrap())
+                    .chain(walk(PathBuf::from("cwd"), cwd).unwrap())
                     .chain(
                         docker_dir
                             .as_ref()
                             .map(|docker_dir| {
-                                walk(PathBuf::from("docker"), docker_dir.clone(), cutoff)
+                                walk(PathBuf::from("docker"), docker_dir.clone())
                                     .into_iter()
                                     .flatten()
                             })
@@ -296,8 +250,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     s3_client,
                     config.bucket.clone(),
                     format!("blobs/{}.tar.zst", id),
+                    None,
                     String::from("application/zstd"),
-                    Some(31536000),
+                    Some(31_536_000),
                     tar,
                 )
                 .await?;
@@ -309,6 +264,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         s3_client,
                         config.bucket.clone(),
                         key,
+                        None,
                         String::from("text/plain"),
                         Some(600),
                         id.as_bytes(),
@@ -370,7 +326,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
                             )
                             .await?;
                         }
-                        fs::write(".kache-info", id).unwrap();
                         println!("Finished unpacking cache");
                         return Ok(());
                     }
@@ -410,9 +365,9 @@ mod tests {
         let target_dir = PathBuf::from(env::var("TARGET_DIR").unwrap());
         let cargo_home = PathBuf::from(env::var("CARGO_HOME").unwrap());
 
-        let paths = walk(PathBuf::from("cargo"), cargo_home, None)
+        let paths = walk(PathBuf::from("cargo"), cargo_home)
             .unwrap()
-            .chain(walk(PathBuf::from("target"), target_dir, None).unwrap());
+            .chain(walk(PathBuf::from("target"), target_dir).unwrap());
         let tar = tar(paths);
         untar(
             vec![
