@@ -1,4 +1,3 @@
-use std::path::Path;
 use async_compression::{
     tokio::{bufread::ZstdDecoder, write::ZstdEncoder},
     Level,
@@ -10,7 +9,7 @@ use std::{
     fs,
     future::Future,
     io,
-    path::PathBuf,
+    path::{Path, PathBuf},
     pin::Pin,
     task::{Context, Poll},
 };
@@ -24,10 +23,7 @@ pub struct FilePathInfo {
     relative: Option<PathBuf>,
 }
 
-pub fn walk(
-    slug: PathBuf,
-    base: PathBuf,
-) -> Result<impl Iterator<Item = FilePathInfo>, io::Error> {
+pub fn walk(slug: PathBuf, base: PathBuf) -> Result<impl Iterator<Item = FilePathInfo>, io::Error> {
     let mut walk = WalkDir::new(&base)
         .sort_by(|a, b| a.file_name().cmp(b.file_name()))
         .into_iter()

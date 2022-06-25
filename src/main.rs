@@ -11,16 +11,15 @@ use std::{
     collections::{BTreeSet, HashMap},
     env,
     error::Error,
-    fs,
-    iter,
+    fs, iter,
     path::PathBuf,
     str::FromStr,
 };
 use tokio::io::AsyncReadExt;
 
+use aws::Region;
 use docker::stop_docker;
 use tar::{tar, untar, walk};
-use aws::Region;
 
 const WEB_SAFE: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_~";
 
@@ -28,22 +27,10 @@ const WEB_SAFE: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123
 struct AwsConfig {
     access_key_id: String,
     secret_access_key: String,
-    #[serde(default, deserialize_with = "deserialize_region")]
-    region: Option<Region>,
+    #[serde(default, with = "serde_with::rust::string_empty_as_none")]
+    region: Option<String>,
     #[serde(default, with = "serde_with::rust::string_empty_as_none")]
     endpoint: Option<String>,
-}
-
-fn deserialize_region<'de, D>(deserializer: D) -> Result<Option<Region>, D::Error>
-where
-    D: serde::de::Deserializer<'de>,
-{
-    serde_with::NoneAsEmptyString::deserialize_as(deserializer).and_then(|str: Option<String>| {
-        Ok(match str {
-            Some(str) => Some(Region::from_str(&str).map_err(de::Error::custom)?),
-            None => None,
-        })
-    })
 }
 
 #[derive(Deserialize, Debug)]
@@ -122,16 +109,19 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Region::Custom {
             name: aws_config
                 .region
-                .as_ref()
-                .map_or("custom-region", Region::name)
-                .to_owned(),
+                .unwrap_or_else(|| String::from("custom-region")),
             endpoint,
         }
     } else {
-        aws_config.region.expect("need AWS_REGION or AWS_ENDPOINT")
+        Region::from_str(&aws_config.region.expect("need AWS_REGION or AWS_ENDPOINT"))
+            .expect("invalid AWS_REGION")
     };
 
-    let s3_client = &aws::s3_new(&aws_config.access_key_id, &aws_config.secret_access_key, region);
+    let s3_client = &aws::s3_new(
+        &aws_config.access_key_id,
+        &aws_config.secret_access_key,
+        region,
+    );
 
     let cwd = PathBuf::from(".");
     let cargo_home = home::cargo_home().unwrap();

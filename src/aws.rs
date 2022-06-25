@@ -20,7 +20,12 @@ pub type Region = rusoto_core::Region;
 pub fn s3_new(access_key_id: &str, secret_access_key: &str, region: Region) -> S3 {
     S3Client::new_with(
         HttpClient::new().expect("failed to create request dispatcher"),
-        StaticProvider::new(access_key_id.to_owned(), secret_access_key.to_owned(), None, None),
+        StaticProvider::new(
+            access_key_id.to_owned(),
+            secret_access_key.to_owned(),
+            None,
+            None,
+        ),
         region,
     )
 }
@@ -32,8 +37,13 @@ pub fn s3_new(access_key_id: &str, secret_access_key: &str, region: Region) -> S
 /// TODO: error docs
 #[allow(clippy::too_many_lines)] // TODO
 pub async fn upload(
-    s3_client: &S3, bucket: String, key: String, content_encoding: Option<String>,
-    content_type: String, cache_control: Option<u64>, read: impl AsyncRead,
+    s3_client: &S3,
+    bucket: String,
+    key: String,
+    content_encoding: Option<String>,
+    content_type: String,
+    cache_control: Option<u64>,
+    read: impl AsyncRead,
 ) -> Result<(), Box<dyn Error>> {
     let pb = &indicatif::ProgressBar::new(0).with_finish(indicatif::ProgressFinish::AndLeave);
     pb.set_style(
@@ -173,7 +183,9 @@ pub async fn upload(
 /// TODO: error docs
 #[allow(clippy::too_many_lines)] // TODO
 pub async fn download(
-    s3_client: &S3, bucket: String, key: String,
+    s3_client: &S3,
+    bucket: String,
+    key: String,
 ) -> Result<impl AsyncBufRead + '_, io::Error> {
     let head = rusoto_retry(|| async {
         s3_client
@@ -260,7 +272,10 @@ pub async fn download(
                         while buf.len() != cap {
                             let _bytes = match body.read_buf(&mut buf).await {
                                 Ok(bytes) => bytes,
-                                Err(_e) => continue 'async_read,
+                                Err(e) => {
+                                    println!("Got transient http error: {:?}. Retrying.", e);
+                                    continue 'async_read;
+                                }
                             };
                             assert!(buf.len() <= cap);
                         }
@@ -313,13 +328,19 @@ where
             Err(RusotoError::HttpDispatch(e)) => {
                 println!("Got transient error: {:?}. Retrying.", e);
             }
+            // https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-retries.html
+            // https://docs.aws.amazon.com/general/latest/gr/api-retries.html
+            // https://aws.amazon.com/premiumsupport/knowledge-center/http-5xx-errors-s3/
+            // backblaze gives us 501 when you give it options it doesn't support
             Err(RusotoError::Unknown(response))
-                // backblaze gives us 501 when you give it options it doesn't support
-                if matches!(response.status.as_u16(), 500 | 502 | 503 | 504)
+                if matches!(response.status.as_u16(), 429 | 500 | 502 | 503 | 504 | 509)
                     || (response.status == 403
                         && str::from_utf8(&response.body)
                             .unwrap()
-                            .contains("RequestTimeTooSkewed")) => {}
+                            .contains("RequestTimeTooSkewed")) =>
+            {
+                println!("Got transient response error: {:?}. Retrying.", response);
+            }
             res => break res,
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -331,7 +352,8 @@ type StreamItem = Result<ListObjectsV2Output, RusotoError<ListObjectsV2Error>>;
 /// This stream repeatedly runs the same request, taking care of adjusting the
 /// [ListObjectsV2Request::continuation_token] as appropriate.
 fn stream_list_objects_v2(
-    request: ListObjectsV2Request, s3_client: &S3Client,
+    request: ListObjectsV2Request,
+    s3_client: &S3Client,
 ) -> impl Stream<Item = StreamItem> + '_ {
     type State<'c> = Option<(ListObjectsV2Request, &'c S3Client)>;
 
@@ -362,10 +384,14 @@ fn stream_list_objects_v2(
 /// Errors are for failed paginated requests, the iterator will terminate at the first failed
 /// request (or when the bucket has been exausted).
 pub async fn list_objects(
-    bucket: &str, s3_client: &S3Client,
+    bucket: &str,
+    s3_client: &S3Client,
 ) -> Result<impl Iterator<Item = Object>, RusotoError<ListObjectsV2Error>> {
     let responses: Vec<Result<ListObjectsV2Output, _>> = stream_list_objects_v2(
-        ListObjectsV2Request { bucket: bucket.to_string(), ..ListObjectsV2Request::default() },
+        ListObjectsV2Request {
+            bucket: bucket.to_string(),
+            ..ListObjectsV2Request::default()
+        },
         s3_client,
     )
     .collect()
