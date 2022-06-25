@@ -1,6 +1,6 @@
 [package]
 name = "kache"
-version = "0.2.6"
+version = "0.2.7"
 authors = ["Tably Team"]
 description = """
 Store and retrieve the Rust build cache.
@@ -13,13 +13,15 @@ publish = true
 argh = "0.1"
 async-compression = { version = "0.3", features = ["tokio", "zstd"] }
 base-x = "0.2"
+base64 = "0.13.0"
 bytes = "1"
 dotenv = "0.15.0"
 envy = "0.4"
 filetime = "0.2"
 futures = "0.3"
 home = "0.5"
-indicatif = { version = "0.17.0-rc.4", features = ["tokio"] }
+indicatif = { version = "0.17.0-rc.11", features = ["tokio"] }
+md-5 = "0.10.1"
 pin-project = "1"
 rand = "0.8"
 rusoto_core = { version = "0.47", default-features = false, features = ["rustls"] }
@@ -40,5 +42,5 @@ shiplift = { version = "0.7", default-features = false, features = ["unix-socket
 shiplift = { version = "0.7", default-features = false }
 
 [patch.crates-io]
-tokio-tar = { version = "0.3", git = "https://github.com/alecmocatta/tokio-tar", branch = "yield_point_fix" }
+tokio-tar = { version = "0.3", git = "https://github.com/alecmocatta/tokio-tar" }
 shiplift = { version = "0.7", git = "https://github.com/alecmocatta/shiplift" }
