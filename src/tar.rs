@@ -2,7 +2,7 @@ use async_compression::{
     tokio::{bufread::ZstdDecoder, write::ZstdEncoder},
     Level,
 };
-use futures::{future::Fuse, FutureExt, StreamExt};
+use futures::{future::Fuse, FutureExt};
 use pin_project::pin_project;
 use std::{
     collections::BTreeMap,

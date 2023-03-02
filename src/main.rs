@@ -5,8 +5,7 @@ mod tar;
 use argh::FromArgs;
 use futures::{future::try_join_all, stream, StreamExt};
 use rusoto_s3::S3Client;
-use serde::{de, Deserialize};
-use serde_with::DeserializeAs;
+use serde::Deserialize;
 use std::{
     collections::{BTreeSet, HashMap},
     env,
