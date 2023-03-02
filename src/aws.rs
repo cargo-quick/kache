@@ -1,16 +1,17 @@
-#![allow(clippy::must_use_candidate)]
+#![allow(clippy::must_use_candidate, clippy::if_not_else)]
 
 use bytes::{Bytes, BytesMut};
-use futures::{stream, Stream, StreamExt, TryStreamExt};
+use futures::{stream, FutureExt, Stream, StreamExt, TryStreamExt};
 use md5::{Digest, Md5};
 use rusoto_core::{HttpClient, RusotoError};
 use rusoto_credential::StaticProvider;
 use rusoto_s3::{
     CompleteMultipartUploadRequest, CompletedMultipartUpload, CompletedPart,
     CreateMultipartUploadRequest, GetObjectRequest, HeadObjectRequest, ListObjectsV2Error,
-    ListObjectsV2Output, ListObjectsV2Request, Object, S3Client, UploadPartRequest, S3 as _,
+    ListObjectsV2Output, ListObjectsV2Request, Object, PutObjectRequest, S3Client,
+    UploadPartRequest, S3 as _,
 };
-use std::{error::Error, future::Future, io, str, time::Duration};
+use std::{error::Error, future::Future, io, str, sync::Arc, time::Duration};
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt};
 
 pub type S3 = S3Client;
@@ -56,46 +57,31 @@ pub async fn upload(
     assert!((5_242_880..5_368_709_120).contains(&part_size)); // S3's min and max 5MiB and 5GiB
     let parallelism = 10;
 
-    let upload_id = &rusoto_retry(|| async {
-        s3_client
-            .create_multipart_upload(CreateMultipartUploadRequest {
-                bucket: bucket.clone(),
-                key: key.clone(),
-                content_encoding: content_encoding.clone(),
-                content_type: Some(content_type.clone()),
-                cache_control: Some(cache_control.map_or_else(
-                    || String::from("no-store, must-revalidate"),
-                    |secs| format!("public, max-age={}", secs),
-                )),
-                ..CreateMultipartUploadRequest::default()
-            })
-            .await
-    })
-    .await?
-    .upload_id
-    .unwrap();
+    let upload_id = &async {
+        rusoto_retry(|| async {
+            s3_client
+                .create_multipart_upload(CreateMultipartUploadRequest {
+                    bucket: bucket.clone(),
+                    key: key.clone(),
+                    content_encoding: content_encoding.clone(),
+                    content_type: Some(content_type.clone()),
+                    cache_control: Some(cache_control.map_or_else(
+                        || String::from("no-store, must-revalidate"),
+                        |secs| format!("public, max-age={}", secs),
+                    )),
+                    ..CreateMultipartUploadRequest::default()
+                })
+                .await
+        })
+        .await
+        .map(|res| res.upload_id.unwrap())
+        .map_err(|err| Arc::new(<Box<dyn Error>>::from(err)))
+    }
+    .shared();
 
     tokio::pin!(read);
 
     let (bucket, key) = (&bucket, &key);
-
-    // TODO: if only 1 part:
-    //  let _ = rusoto_retry(|| async {
-    //      let mut tar = tar.try_clone().await.unwrap();
-    //      let _ = tar.rewind().await.unwrap();
-    //      let tar = pb.wrap_async_read(tar);
-    //      s3_client
-    //          .put_object(PutObjectRequest {
-    //              bucket: bucket.clone(),
-    //              key: key.clone(),
-    //              cache_control: Some(format!("public, max-age={}", 31536000)),
-    //              content_type: Some(String::from("application/zstd")),
-    //              ..Default::default()
-    //          })
-    //          .await
-    //  })
-    //  .await
-    //  .unwrap();
 
     let e_tags = futures::stream::unfold(read, |mut read| async move {
         let mut buf = BytesMut::with_capacity(part_size);
@@ -124,7 +110,7 @@ pub async fn upload(
                     .upload_part(UploadPartRequest {
                         bucket: bucket.clone(),
                         key: key.clone(),
-                        upload_id: upload_id.clone(),
+                        upload_id: upload_id.clone().await.unwrap(),
                         part_number: (i + 1).try_into().unwrap(),
                         content_md5: Some(base64::encode(
                             &Md5::new().chain_update(&buf).finalize(),
@@ -149,29 +135,51 @@ pub async fn upload(
     .try_collect::<Vec<String>>()
     .await?;
 
-    let _ = rusoto_retry(|| async {
-        s3_client
-            .complete_multipart_upload(CompleteMultipartUploadRequest {
-                bucket: bucket.clone(),
-                key: key.clone(),
-                upload_id: upload_id.clone(),
-                multipart_upload: Some(CompletedMultipartUpload {
-                    parts: Some(
-                        e_tags
-                            .iter()
-                            .enumerate()
-                            .map(|(i, e_tag)| CompletedPart {
-                                part_number: Some((i + 1).try_into().unwrap()),
-                                e_tag: Some(e_tag.clone()),
-                            })
-                            .collect(),
-                    ),
-                }),
-                ..CompleteMultipartUploadRequest::default()
-            })
-            .await
-    })
-    .await?;
+    if !e_tags.is_empty() {
+        let _ = rusoto_retry(|| async {
+            s3_client
+                .complete_multipart_upload(CompleteMultipartUploadRequest {
+                    bucket: bucket.clone(),
+                    key: key.clone(),
+                    upload_id: upload_id.clone().await.unwrap(),
+                    multipart_upload: Some(CompletedMultipartUpload {
+                        parts: Some(
+                            e_tags
+                                .iter()
+                                .enumerate()
+                                .map(|(i, e_tag)| CompletedPart {
+                                    part_number: Some((i + 1).try_into().unwrap()),
+                                    e_tag: Some(e_tag.clone()),
+                                })
+                                .collect(),
+                        ),
+                    }),
+                    ..CompleteMultipartUploadRequest::default()
+                })
+                .await
+        })
+        .await?;
+    } else {
+        let _ = rusoto_retry(|| async {
+            s3_client
+                .put_object(PutObjectRequest {
+                    bucket: bucket.clone(),
+                    key: key.clone(),
+                    content_encoding: content_encoding.clone(),
+                    content_type: Some(content_type.clone()),
+                    cache_control: Some(cache_control.map_or_else(
+                        || String::from("no-store, must-revalidate"),
+                        |secs| format!("public, max-age={}", secs),
+                    )),
+                    content_md5: Some(base64::encode(&Md5::new().finalize())),
+                    body: None,
+                    ..PutObjectRequest::default()
+                })
+                .await
+        })
+        .await
+        .unwrap();
+    }
 
     Ok(())
 }
@@ -226,10 +234,6 @@ pub async fn download(
         part_size
     };
 
-    assert!(
-        part_size * (parts.unwrap_or(1) - 1) < length && length <= part_size * parts.unwrap_or(1)
-    );
-
     let pb = indicatif::ProgressBar::new(length).with_finish(indicatif::ProgressFinish::AndLeave);
     pb.set_style(
         indicatif::ProgressStyle::default_bar()
@@ -239,6 +243,8 @@ pub async fn download(
 
     if let Some(parts) = parts {
         let parallelism = 20;
+
+        assert!(part_size * parts < length + part_size && length <= part_size * parts);
 
         let body = tokio_util::io::StreamReader::new(
             futures::stream::iter((0..parts).map(move |i| {
@@ -332,12 +338,24 @@ where
             // https://docs.aws.amazon.com/general/latest/gr/api-retries.html
             // https://aws.amazon.com/premiumsupport/knowledge-center/http-5xx-errors-s3/
             // backblaze gives us 501 when you give it options it doesn't support
+            // https://docs.aws.amazon.com/AmazonS3/latest/API/ErrorResponses.html
+            // maybe also ExpiredToken TokenRefreshRequired?
+            // https://docs.aws.amazon.com/AWSJavaScriptSDK/v3/latest/modules/_aws_sdk_service_error_classification.html
+            // 499: cloudflare https://github.com/tablyinc/tably/issues/1009#issuecomment-1411922970
             Err(RusotoError::Unknown(response))
                 if matches!(response.status.as_u16(), 429 | 500 | 502 | 503 | 504 | 509)
                     || (response.status == 403
                         && str::from_utf8(&response.body)
                             .unwrap()
-                            .contains("RequestTimeTooSkewed")) =>
+                            .contains("RequestTimeTooSkewed"))
+                    || (response.status == 400
+                        && str::from_utf8(&response.body)
+                            .unwrap()
+                            .contains("RequestTimeout"))
+                    || (response.status == 499
+                        && str::from_utf8(&response.body)
+                            .unwrap()
+                            .contains("Client Disconnect")) =>
             {
                 println!("Got transient response error: {:?}. Retrying.", response);
             }
