@@ -1,5 +1,6 @@
 #![allow(clippy::must_use_candidate, clippy::if_not_else)]
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use bytes::{Bytes, BytesMut};
 use futures::{stream, FutureExt, Stream, StreamExt, TryStreamExt};
 use md5::{Digest, Md5};
@@ -112,9 +113,7 @@ pub async fn upload(
                         key: key.clone(),
                         upload_id: upload_id.clone().await.unwrap(),
                         part_number: (i + 1).try_into().unwrap(),
-                        content_md5: Some(base64::encode(
-                            &Md5::new().chain_update(&buf).finalize(),
-                        )),
+                        content_md5: Some(BASE64.encode(Md5::new().chain_update(&buf).finalize())),
                         body: Some(rusoto_core::ByteStream::new_with_size(
                             stream::once(async { Ok(buf) }),
                             buf_len,
@@ -171,7 +170,7 @@ pub async fn upload(
                         || String::from("no-store, must-revalidate"),
                         |secs| format!("public, max-age={}", secs),
                     )),
-                    content_md5: Some(base64::encode(&Md5::new().finalize())),
+                    content_md5: Some(BASE64.encode(Md5::new().finalize())),
                     body: None,
                     ..PutObjectRequest::default()
                 })

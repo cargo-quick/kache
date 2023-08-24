@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euxo pipefail
 
-RUST_TOOLCHAIN=nightly-2021-12-08
+RUST_TOOLCHAIN=nightly-2023-06-04
 
 # Shamelessly stolen from https://github.com/alsuren/cargo-quickinstall/blob/main/build-version.sh
 

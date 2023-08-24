@@ -1,4 +1,4 @@
 [toolchain]
 # remember to sync with scripts/build-version.sh
-channel = "nightly-2021-12-08"
+channel = "nightly-2023-06-04"
 profile = "minimal"

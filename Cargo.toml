@@ -1,6 +1,6 @@
 [package]
 name = "kache"
-version = "0.2.9"
+version = "0.2.10"
 authors = ["Tably Team"]
 description = """
 Store and retrieve the Rust build cache.
@@ -11,9 +11,9 @@ publish = true
 
 [dependencies]
 argh = "0.1"
-async-compression = { version = "0.3", features = ["tokio", "zstd"] }
+async-compression = { version = "0.4", features = ["tokio", "zstd"] }
 base-x = "0.2"
-base64 = "0.13.0"
+base64 = "0.21"
 bytes = "1"
 dotenv = "0.15.0"
 envy = "0.4"
@@ -24,15 +24,15 @@ indicatif = { version = "0.17.0-rc.11", features = ["tokio"] }
 md-5 = "0.10.1"
 pin-project = "1"
 rand = "0.8"
-rusoto_core = { version = "0.47", default-features = false, features = ["rustls"] }
-rusoto_credential = "0.47"
-rusoto_s3 = { version = "0.47", default-features = false, features = ["rustls"] }
+rusoto_core = { version = "0.48", default-features = false, features = ["rustls"] }
+rusoto_credential = "0.48"
+rusoto_s3 = { version = "0.48", default-features = false, features = ["rustls"] }
 serde = "1"
 serde_json = "1"
 serde_with = "1"
 tokio = { version = "1", features = ["macros", "net", "fs", "process", "rt-multi-thread", "io-util"] }
 tokio-tar = "0.3"
-tokio-util = { version = "0.6", features = ["io"] }
+tokio-util = { version = "0.7", features = ["io"] }
 walkdir = "2"
 
 [target.'cfg(unix)'.dependencies]
