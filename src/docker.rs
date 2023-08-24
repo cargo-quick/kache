@@ -23,6 +23,9 @@ where
             if !status.success() {
                 return Err(format!("{:?}", status).into());
             }
+            let mut docker_stop = process::Command::new("sudo");
+            docker_stop.args(["systemctl", "stop", "docker.socket"]);
+            let _status = docker_stop.status().await?;
         } else if cfg!(target_os = "macos") {
             let mut docker_stop = process::Command::new("osascript");
             docker_stop.args(["-e", "quit app \"Docker\""]);
